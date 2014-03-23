@@ -1,0 +1,24 @@
+details:
+  - analysis: variant2
+    algorithm:
+      aligner: novoalignCS
+      #some other aligners needed to be tested
+      #aligner: mosaik
+      #aligner: bfast
+      variantcaller: [gatk, samtools, freebayes]
+      #variantcaller: gatk-haplotype
+      #variantcaller: freebayes
+      #variantcaller: cortex
+      #sv_detection: hydra
+      quality_format: Standard
+      coverage_interval: "exome" # other options: genome, regional
+      trim_reads: true
+      align_split_size: 90000
+      variant_regions:  /space/users/analyst/bcbio/input/SeqCap_EZ_Exome_v3_primary_GRCh37.bed
+      #validate: ../reference_material/7_100326_FC6107FAAXX-grade.vcf
+    description: Test1_Far
+    files: p1.BIN1_1_F3.fastq
+    metadata:
+      batch: TestBatch1
+    genome_build: hg19
+    lane: 1

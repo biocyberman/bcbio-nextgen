@@ -37,6 +37,7 @@ def align_bam(in_bam, ref_file, names, align_dir, config):
     num_cores = config["algorithm"].get("num_cores", 1)
     max_mem = resources.get("memory", "4G")
     extra_novo_args = " ".join(_novoalignCS_args_from_config(config, False))
+    file_format = config["algorithm"].get("file_format", "BAMPE")
 
     if not file_exists(out_file):
         with curdir_tmpdir(base_dir=align_dir) as work_dir:
@@ -45,7 +46,7 @@ def align_bam(in_bam, ref_file, names, align_dir, config):
                 cmd = ("{novosort} -c {num_cores} -m {max_mem} --compression 0 "
                        " -n -t {work_dir} {in_bam} "
                        "| {novoalignCS} -o SAM '{rg_info}' -d {ref_file} -f /dev/stdin "
-                       "  -F BAMPE -c {num_cores} {extra_novo_args} "
+                       "  -F {file_format} -c {num_cores} {extra_novo_args} "
                        "| {samtools} view -b -S -u - "
                        "| {novosort} -c {num_cores} -m {max_mem} -t {work_dir} "
                        "  -o {tx_out_file} /dev/stdin")

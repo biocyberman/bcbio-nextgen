@@ -11,7 +11,7 @@ from bcbio import bam, broad, utils
 from bcbio.bam import cram
 from bcbio.distributed.transaction import file_transaction
 from bcbio.ngsalign import (bowtie, bwa, tophat, bowtie2, mosaik,
-                            novoalign, star)
+                            novoalign, novoalignCS, star)
 
 # Define a next-generation sequencing tool to plugin:
 # align_fn -- runs an aligner and generates SAM output
@@ -37,6 +37,8 @@ TOOLS = {
                       None),
     "novoalign": NgsTool(novoalign.align, novoalign.align_pipe, novoalign.align_bam,
                          novoalign.galaxy_location_file, novoalign.remap_index_fn, novoalign.can_pipe),
+    "novoalignCS": NgsTool(novoalignCS.align, novoalignCS.align_pipe, novoalignCS.align_bam,
+                        novoalignCS.galaxy_location_file, novoalignCS.remap_index_fn, novoalignCS.can_pipe),
     "tophat": NgsTool(tophat.align, None, None, bowtie2.galaxy_location_file, bowtie2.remap_index_fn,
                       None),
     "samtools": NgsTool(None, None, None, BASE_LOCATION_FILE, None, None),

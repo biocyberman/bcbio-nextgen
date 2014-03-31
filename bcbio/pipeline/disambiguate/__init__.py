@@ -59,7 +59,7 @@ def run(items, config):
     # check aligner, handling tophat/tophat2 distinctions
     aligner = config["algorithm"].get("aligner")
     aligner = "tophat" if aligner.startswith("tophat") else aligner
-    assert aligner in ["bwa", "tophat"], "Disambiguation only supported for bwa and tophat alignments."
+    assert aligner in ["bwa", "tophat", "star"], "Disambiguation only supported for bwa, star and tophat alignments."
     if items[0]["disambiguate"].get("base"):
         data_a, data_b = items
     else:
@@ -67,7 +67,7 @@ def run(items, config):
     work_bam_a = bam.sort(data_a["work_bam"], config, "queryname")
     work_bam_b = bam.sort(data_b["work_bam"], config, "queryname")
     out_dir = os.path.normpath(os.path.join(os.path.dirname(work_bam_a),
-                                            os.pardir, os.pardir, "disambiguate"))
+                                            os.pardir, "disambiguate_%s" % aligner))
     base_name = os.path.join(out_dir, os.path.splitext(os.path.basename(work_bam_a))[0])
     summary_file = "%s_summary.txt" % base_name
     if not utils.file_exists(summary_file):
@@ -92,7 +92,7 @@ def run_cplusplus(items, config):
     # check aligner, handling tophat/tophat2 distinctions
     aligner = config["algorithm"].get("aligner")
     aligner = "tophat" if aligner.startswith("tophat") else aligner
-    assert aligner in ["bwa", "tophat"], "Disambiguation only supported for bwa and tophat alignments."
+    assert aligner in ["bwa", "tophat", "star"], "Disambiguation only supported for bwa, star and tophat alignments."
     if items[0]["disambiguate"].get("base"):
         data_a, data_b = items
     else:

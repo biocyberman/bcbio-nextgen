@@ -68,19 +68,20 @@ resubmitting jobs that may have failed for reproducible reasons.
 
 Finally, the ``-r resources`` flag specifies resource options to pass along
 to the underlying queue scheduler. This currently supports SGE's
-``-l`` parameter and SLURM native flags. This allows specification
+``-l`` parameter, Torque's ``-l`` parameter, LSF and SLURM native flags. This allows specification
 or resources to the scheduler (see the `qsub man page`_). You may specify multiple
 resources, so ``-r mem=4g -r ct=01:40:00``
 translates to ``-l mem=4g -l ct=01:40:00`` when passed to ``qsub`` or
 ``-r "account=a2010002;timelimit=04:00:00"`` when using SLURM, for
-instance.
+instance. SLURM and Torque support specification of an account parameter with
+``-r account=your_name``, which IPython transfers into ``-A``.
 
-``-r pename=your_pe`` supports specifying the `SGE parallel environment`_
-to use for submitting multicore jobs. Since this setup
+Specify the `SGE parallel environment`_ to use for submitting multicore jobs
+with ``-r pename=your_pe``. Since this setup
 is system specific it is hard to write general code for find a
 suitable environment. Specifically, when there are multiple usable
 parallel environments, it will select the first one which may not be
-correct. Manually specifying it with a ``pename=` flag to resources
+correct. Manually specifying it with a ``pename=`` flag to resources
 will ensure correct selection of the right environment.
 
 .. _qsub man page: http://gridscheduler.sourceforge.net/htmlman/htmlman1/qsub.html
@@ -91,7 +92,6 @@ will ensure correct selection of the right environment.
 .. _Lustre: http://wiki.lustre.org/index.php/Main_Page
 .. _NFS: https://en.wikipedia.org/wiki/Network_File_System_%28protocol%29
 .. _SGE parallel environment: https://blogs.oracle.com/templedf/entry/configuring_a_new_parallel_environment
-.. _memory-management:
 
 Troubleshooting
 ===============
@@ -113,6 +113,8 @@ where ``host-ip`` is replaced by the actual IP address of the machine
 and `hostname` by the machine's own hostname, should be aded to ``/etc/hosts``
 on each compute node. This will probably involve contacting your local
 cluster administrator.
+
+.. _memory-management:
 
 Memory management
 ~~~~~~~~~~~~~~~~~

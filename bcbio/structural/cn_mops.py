@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 
-import pybedtools
 import pysam
 
 from bcbio import bam, install, utils
@@ -60,6 +59,7 @@ def _combine_out_files(chr_files, base_bam, work_dir):
 def _prep_sample_cnvs(cnv_file, data):
     """Convert a multiple sample CNV file into a single BED file for a sample.
     """
+    import pybedtools
     sample_name = data["name"][-1]
     sample_file = os.path.join(os.path.dirname(cnv_file), "%s-cnv.bed" % sample_name)
     if not utils.file_exists(sample_file):
@@ -101,7 +101,7 @@ def _allowed_cnmops_errorstates(msg):
 def _prep_load_script(work_bams, names, chrom, items):
     pairmode = "paired" if bam.is_paired(work_bams[0]) else "unpaired"
     print len(items), items[0].get("metadata")
-    if len(items) == 2 and items[0].get("metadata", {}).get("phenotype") in ["tumor", "normal"]:
+    if len(items) == 2 and vcfutils.get_paired_phenotype(items[0]):
         load_script = _paired_load_script
     else:
         load_script = _population_load_script
@@ -116,9 +116,9 @@ def _population_load_script(work_bams, names, chrom, pairmode, items):
 def _paired_load_script(work_bams, names, chrom, pairmode, items):
     """Prepare BAMs for assessing CNVs in a paired tumor/normal setup.
     """
-    case_bam, case_name, ctrl_bam, ctrl_name = vcfutils.get_paired_bams(work_bams, items)
-    return _paired_prep.format(case_file=case_bam, case_name=case_name,
-                               ctrl_file=ctrl_bam, ctrl_name=ctrl_name,
+    paired = vcfutils.get_paired_bams(work_bams, items)
+    return _paired_prep.format(case_file=paired.tumor_bam, case_name=paired.tumor_name,
+                               ctrl_file=paired.normal_bam, ctrl_name=paired.normal_name,
                                num_cores=0, chrom=chrom, pairmode=pairmode)
 
 _script = """

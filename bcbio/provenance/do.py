@@ -7,10 +7,11 @@ import subprocess
 import time
 
 from bcbio import utils
-from bcbio.log import logger, logger_cl
+from bcbio.log import logger, logger_cl, logger_stdout
 from bcbio.provenance import diagnostics
 
-def run(cmd, descr, data=None, checks=None, region=None, log_error=True):
+def run(cmd, descr, data=None, checks=None, region=None, log_error=True,
+        log_stdout=False):
     """Run the provided command, logging details and checking for errors.
     """
     descr = _descr_str(descr, data, region)
@@ -19,7 +20,7 @@ def run(cmd, descr, data=None, checks=None, region=None, log_error=True):
     cmd_id = diagnostics.start_cmd(descr, data, cmd)
     try:
         logger_cl.debug(" ".join(cmd) if not isinstance(cmd, basestring) else cmd)
-        _do_run(cmd, checks)
+        _do_run(cmd, checks, log_stdout)
     except:
         diagnostics.end_cmd(cmd_id, False)
         if log_error:
@@ -90,7 +91,7 @@ def _normalize_cmd_args(cmd):
     else:
         return cmd, False, None
 
-def _do_run(cmd, checks):
+def _do_run(cmd, checks, log_stdout=False):
     """Perform running and check results, raising errors for issues.
     """
     cmd, shell_arg, executable_arg = _normalize_cmd_args(cmd)
@@ -98,21 +99,27 @@ def _do_run(cmd, checks):
                          stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, close_fds=True)
     debug_stdout = collections.deque(maxlen=100)
-    with contextlib.closing(s.stdout) as stdout:
-        while 1:
-            line = stdout.readline()
-            if line:
-                debug_stdout.append(line)
+    while 1:
+        line = s.stdout.readline()
+        if line:
+            debug_stdout.append(line)
+            if log_stdout:
+                logger_stdout.debug(line.rstrip())
+            else:
                 logger.debug(line.rstrip())
-            exitcode = s.poll()
-            if exitcode is not None:
-                if exitcode is not None and exitcode != 0:
-                    error_msg = " ".join(cmd) if not isinstance(cmd, basestring) else cmd
-                    error_msg += "\n"
-                    error_msg += "".join(debug_stdout)
-                    raise subprocess.CalledProcessError(exitcode, error_msg)
-                else:
-                    break
+        exitcode = s.poll()
+        if exitcode is not None:
+            if exitcode is not None and exitcode != 0:
+                error_msg = " ".join(cmd) if not isinstance(cmd, basestring) else cmd
+                error_msg += "\n"
+                error_msg += "".join(debug_stdout)
+                s.communicate()
+                s.stdout.close()
+                raise subprocess.CalledProcessError(exitcode, error_msg)
+            else:
+                break
+    s.communicate()
+    s.stdout.close()
     # Check for problems not identified by shell return codes
     if checks:
         for check in checks:

@@ -5,7 +5,7 @@ Handles runs in local or distributed mode based on the command line or
 configured parameters.
 
 The <config file> is a global YAML configuration file specifying details
-about the system. An example configuration file is in 'config/post_process.yaml'.
+about the system. An example configuration file is in 'config/bcbio_sample.yaml'.
 This is optional for automated installations.
 
 <fc_dir> is an optional parameter specifying a directory of Illumina output
@@ -30,11 +30,13 @@ import os
 import sys
 
 from bcbio import install, workflow
+from bcbio.illumina import machine
+from bcbio.distributed import runfn
 from bcbio.pipeline.main import run_main, parse_cl_args
 from bcbio.server import main as server_main
+from bcbio.provenance import programs
 
 def main(**kwargs):
-    kwargs["work_dir"] = os.getcwd()
     run_main(**kwargs)
 
 if __name__ == "__main__":
@@ -43,10 +45,16 @@ if __name__ == "__main__":
         install.upgrade_bcbio(kwargs["args"])
     elif "server" in kwargs and kwargs["server"]:
         server_main.start(kwargs["args"])
+    elif "runfn" in kwargs and kwargs["runfn"]:
+        runfn.process(kwargs["args"])
+    elif "version" in kwargs and kwargs["version"]:
+        programs.write_versions({"work": kwargs["args"].workdir})
+    elif "sequencer" in kwargs and kwargs["sequencer"]:
+        machine.check_and_postprocess(kwargs["args"])
     else:
         if kwargs.get("workflow"):
-            setup_info = workflow.setup(kwargs["workflow"], kwargs["inputs"])
-            if setup_info is None: # no automated run after setup
+            setup_info = workflow.setup(kwargs["workflow"], kwargs.pop("inputs"))
+            if setup_info is None:  # no automated run after setup
                 sys.exit(0)
             workdir, new_kwargs = setup_info
             os.chdir(workdir)

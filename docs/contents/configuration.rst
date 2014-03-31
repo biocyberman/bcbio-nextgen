@@ -65,6 +65,10 @@ multiple samples using the template workflow command::
    -  :ref:`sample-configuration` metadata key/value pairs. Any columns not
       falling into the above cases will go into the metadata section.
 
+  Individual column items can contain booleans (true or false), integers, or
+  lists (separated by semi-colons). These get converted into the expected time
+  in the output YAML file.
+
   The name of the metadata file, minus the ``.csv`` extension, is a
   short name identifying the current project. The script creates a
   ``project1`` directory containing the sample configuration in
@@ -98,32 +102,49 @@ The sample configuration file defines ``details`` of each sample to process::
 
     details:
       - analysis: variant2
+        lane: 1
+        description: Example1
+        files: [in_pair_1.fq, in_pair_2.fq]
+        genome_build: hg19
         algorithm:
+          platform:illumina
         metadata:
           batch: Batch1
           sex: female
-        lane: 1
-        description: Example1
-        genome_build: hg19
 
 - ``analysis`` Analysis method to use [variant2, RNA-seq]
+- ``lane`` A unique number within the project. Corresponds to the
+  ``ID`` parameter in the BAM read group. Required.
+- ``description`` Unique name for this sample, corresponding to the
+  ``SM`` parameter in the BAM read group.
+- ``files`` A list of files to process. This currently supports either a single
+  end or two paired end fastq files, or a single BAM file. It does not yet
+  handle merging BAM files or more complicated inputs.
+- ``genome_build`` Genome build to align to, which references a genome
+  keyword in Galaxy to find location build files.
+
 - ``algorithm`` Parameters to configure algorithm inputs. Options
   described in more detail below.
 - ``metadata`` Additional descriptive metadata about the sample:
 
     - ``batch`` defines a group that the sample falls in. We perform
        multi-sample variant calling on all samples with the same batch
-       name.
+       name. This can also be a list, allowing specification of a single normal
+       sample to pair with multiple tumor samples in paired cancer variant
+       calling (``batch: [MatchWithTumor1, MatchWithTumor2]``).
 
     - ``sex`` specifies the sample sex used to correctly prepare X/Y
       chromosomes.
 
-- ``lane`` A unique number within the project. Corresponds to the
-  ``ID`` parameter in the BAM read group. Required.
-- ``description`` Unique name for this sample, corresponding to the
-  ``SM`` parameter in the BAM read group.
-- ``genome_build`` Genome build to align to, which references a genome
-  keyword in Galaxy to find location build files.
+Setting up a test run
+~~~~~~~~~~~~~~~~~~~~~
+The if you set the ``test_run`` option to ``True`` at the top of your sample
+configuration file like this::
+
+  test_run: True
+
+bcbio-nextgen will downsample your input files to 500,000 entries before
+running the pipeline.
 
 .. _upload-configuration:
 
@@ -141,7 +162,7 @@ directory::
      upload:
        dir: /local/filesystem/directory
 
-General parameters:
+General parameters, always required:
 
 - ``method`` Upload method to employ. Defaults to local filesystem.
   [filesystem, galaxy, s3]
@@ -164,13 +185,19 @@ Galaxy parameters:
   the sample details section. The `Galaxy Admin`_ documentation
   has more details about roles.
 
-Here is an example configuration for uploading to a Galaxy instance::
+Here is an example configuration for uploading to a Galaxy instance. This
+assumes you have a shared mounted filesystem that your Galaxy instance can
+also access::
 
       upload:
-	method: galaxy
-	galaxy_url: http://url-to-galaxy-instance
-	galaxy_api_key: YOURAPIKEY
-	galaxy_library: data_library_to_upload_to
+        method: galaxy
+        dir: /path/to/shared/galaxy/filesystem/folder
+        galaxy_url: http://url-to-galaxy-instance
+        galaxy_api_key: YOURAPIKEY
+        galaxy_library: data_library_to_upload_to
+
+Your Galaxy universe_wsgi.ini configuration needs to have
+``allow_library_path_paste = True`` set to enable uploads.
 
 S3 parameters:
 
@@ -181,6 +208,23 @@ S3 parameters:
   with reduced redundancy: cheaper but less reliable [false, true]
 
 .. _algorithm-config:
+
+Globals
+~~~~~~~
+You can define files used multiple times in the ``algorithm`` section of your
+configuration in a top level ``globals`` dictionary. This saves copying and
+pasting across the configuration and makes it easier to manually adjust the
+configuration if inputs change::
+
+  globals:
+    my_custom_locations: /path/to/file.bed
+  details:
+    - description: sample1
+      algorithm:
+        variant_regions: my_custom_locations
+    - description: sample2
+      algorithm:
+        variant_regions: my_custom_locations
 
 Algorithm parameters
 ~~~~~~~~~~~~~~~~~~~~
@@ -194,7 +238,7 @@ Alignment
 
 - ``platform`` Sequencing platform used. Corresponds to the ``PL``
   parameter in BAM read groups. Default 'Illumina'.
--  ``aligner`` Aligner to use: [bwa, bowtie, bowtie2, mosaik, novoalign,
+-  ``aligner`` Aligner to use: [bwa, bowtie, bowtie2, mosaik, novoalign, star,
    false]
 -  ``bam_clean`` Clean an input BAM when skipping alignment step. This
    handles adding read groups, sorting to a reference genome and
@@ -212,8 +256,10 @@ Alignment
   disambiguation and continue with reads confidently aligned to hg19.
 -  ``trim_reads`` Can be set to trim low quality ends or to also trim off,
     in conjunction with the ``adapters`` field a set of adapter sequences or
-    poly-A tails that could appear on the ends of reads:
-    [low_quality, read_through, False]
+    poly-A tails that could appear on the ends of reads. Only used in RNA-seq
+    pipelines, not variant calling. [False, read_through]
+- ``min_read_length`` Minimum read length to maintain when
+  ``read_through`` trimming set in ``trim_reads``. Defaults to 20.
 -  ``adapters`` If trimming adapter read through, trim a set of stock
    adapter sequences. Allows specification of multiple items in a list,
    for example [truseq, polya] will trim both TruSeq adapter sequences
@@ -233,24 +279,28 @@ Alignment
    want variant calls [true, false]
 -  ``coverage_bigwig`` Generate a bigwig file of coverage, for loading
    into the UCSC genome browser [true, false]
+-  ``strandedness`` For RNA-seq libraries, if your library is strand
+   specific, set the appropriate flag form [unstranded, firststrand, secondstrand].
+   Defaults to unstranded. For dUTP marked libraries, firststrand is correct; for
+   Scriptseq prepared libraries, secondstrand is correct.
 
 Experimental information
 ========================
 
 -  ``coverage_interval`` Regions covered by sequencing. Influences GATK
-   options for filtering [exome, genome, regional]
--  ``coverage_depth`` Depth of sequencing coverage. Influences GATK
-   variant calling and selection of super-high coverage regions to
-   exclude [high, low, super-high]
--  ``hybrid_target`` BED file with target regions for hybrid selection
-   experiments. This is only a descriptive set of regions for metrics
-   assessment. Use ``variant_regions`` to restrict calling and
-   assessment regions. ``hybrid_bait`` is also required for metrics
-   and if not present, the ``variant_regions`` we use
-   ``variant_regions`` for both in calculating metrics.
-- ``hybrid_bait`` BED file with bait regions for hybrid selection,
-  required along with ``hybrid_target`` to calculate hybrid selection
-  methods.
+   options for filtering. GATK will use Variant Quality Score Recalibration
+   when set to 'genome', otherwise we apply hard filters. [exome, genome, regional]
+- ``coverage_depth_max`` Maximum depth of coverage. We downsample coverage
+   regions with more than this value to approximately the specified
+   coverage. Actual coverage depth per position will be higher since we
+   downsample reads based on shared start positions, although some callers like
+   GATK can also downsample to exactly this coverage per position. We avoid
+   calling entirely in super high depth regions with more than 7 times coverage
+   for this parameter. This controls memory usage in highly repetitive regions
+   like centromeres. Defaults to 10000. Set to 0 to perform no downsampling.
+-  ``coverage_depth_min`` Minimum depth of coverage. Regions will less reads
+   will not get called. Defaults to 4. Setting lower than 4 will trigger
+   low-depth calling options for GATK.
 -  ``ploidy`` Ploidy of called reads. Defaults to 2 (diploid).
 
 Variant calling
@@ -258,7 +308,7 @@ Variant calling
 
 -  ``variantcaller`` Variant calling algorithm. Can be a list of
    multiple options [gatk, freebayes, varscan, samtools,
-   gatk-haplotype, cortex]
+   gatk-haplotype, cortex, mutect]
 -  ``variant_regions`` BED file of regions to call variants in.
 -  ``mark_duplicates`` Identify and remove variants [picard,
    biobambam, samtools, false]
@@ -281,6 +331,9 @@ Variant calling
 - ``clinical_reporting`` Tune output for clinical reporting.
   Modifies snpEff parameters to use HGVS notational on canonical
   transcripts [false, true].
+- ``background`` Provide a VCF file with variants to use as a background
+  reference during variant calling. For tumor/normal paired calling use this to
+  supply a panel of normal individuals.
 
 Parallelization
 ===============
@@ -354,9 +407,11 @@ and memory and compute resources to devote to them::
   are on the path.
 - ``dir`` For software not distributed as a single executable, like
   files of Java jars, the location of the base directory.
-- ``cores`` Cores to use for multi-proccessor enabled software. On
-  cluster systems, match this with the number of physical cores
-  available on individual machines.
+- ``cores`` Cores to use for multi-proccessor enabled software. This is how
+  many cores will be allocated per job. For example if you are running
+  10 samples and passed -n 40 to bcbio-nextgen and the step you are running
+  has cores: 8 set, a maximum of five samples will run in parallel, each using
+  8 cores.
 - ``jvm_opts`` Specific memory usage options for Java software. For
   memory usage on programs like GATK, specify the maximum usage per
   core. On multicore machines, that's machine-memory divided by cores.
@@ -370,6 +425,9 @@ and memory and compute resources to devote to them::
   memory. Always specify this as the memory usage for a single core,
   and the pipeline handles scaling this when a process uses multiple
   cores.
+- ``keyfile`` Specify the location of a program specific key file, obtained from
+  the third party software tool. Include the path to a GATK supplied key file
+  to disable the `GATK phone home`_ feature.
 
 .. _bcbio.variation: https://github.com/chapmanb/bcbio.variation
 .. _CloudBioLinux: https://github.com/chapmanb/cloudbiolinux
@@ -380,6 +438,7 @@ and memory and compute resources to devote to them::
 .. _Galaxy API: http://wiki.galaxyproject.org/Learn/API
 .. _Amazon S3: http://aws.amazon.com/s3/
 .. _Galaxy Admin: http://wiki.galaxyproject.org/Admin/DataLibraries/LibrarySecurity
+.. _GATK phone home: http://gatkforums.broadinstitute.org/discussion/1250/what-is-phone-home-and-how-does-it-affect-me
 
 Genome configuration files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -423,7 +482,9 @@ Reference genome files
 ~~~~~~~~~~~~~~~~~~~~~~
 
 The pipeline requires access to reference genomes, including the raw
-FASTA sequence and pre-built indexes for aligners. The
+FASTA sequence and pre-built indexes for aligners. For human genomes, the
+automated installer provides hg19 and GRCh37 1000 genomes references as
+provided in the `GATK resource bundle`_.
 :ref:`data-requirements` section describes the expected layout of
 `Galaxy .loc files`_ pointing to the actual sequence and index
 files.

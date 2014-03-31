@@ -4,9 +4,10 @@ import contextlib
 
 from IPython.parallel import require
 
-from bcbio.distributed import ipython
+from bcbio.bam import callable
 from bcbio.ngsalign import alignprep
-from bcbio.pipeline import disambiguate, sample, lane, qcsummary, shared, variation
+from bcbio.pipeline import (config_utils, disambiguate, sample, lane, qcsummary, shared,
+                            variation, rnaseq)
 from bcbio.provenance import system
 from bcbio import structural
 from bcbio import chipseq
@@ -20,10 +21,10 @@ def _setup_logging(args):
     if len(args) == 1 and isinstance(args[0], (list, tuple)):
         args = args[0]
     for arg in args:
-        if ipython.is_nested_config_arg(arg):
+        if config_utils.is_nested_config_arg(arg):
             config = arg["config"]
             break
-        elif ipython.is_std_config_arg(arg):
+        elif config_utils.is_std_config_arg(arg):
             config = arg
             break
     if config is None:
@@ -52,7 +53,6 @@ def trim_lane(*args):
 def process_alignment(*args):
     with _setup_logging(args):
         return apply(lane.process_alignment, *args)
-process_alignment.metadata = {"resources": ["novoalign", "bwa", "bowtie2", "tophat2"]}
 
 @require(alignprep)
 def prep_align_inputs(*args):
@@ -63,7 +63,6 @@ def prep_align_inputs(*args):
 def postprocess_alignment(*args):
     with _setup_logging(args):
         return apply(lane.postprocess_alignment, *args)
-postprocess_alignment.metadata = {"resources": ["gatk"]}
 
 @require(sample)
 def merge_sample(*args):
@@ -74,7 +73,6 @@ def merge_sample(*args):
 def delayed_bam_merge(*args):
     with _setup_logging(args):
         return apply(sample.delayed_bam_merge, *args)
-delayed_bam_merge.metadata = {"resources": ["samtools"]}
 
 @require(sample)
 def recalibrate_sample(*args):
@@ -85,7 +83,6 @@ def recalibrate_sample(*args):
 def prep_recal(*args):
     with _setup_logging(args):
         return apply(recalibrate.prep_recal, *args)
-prep_recal.metadata = {"resources": ["gatk"]}
 
 @require(recalibrate)
 def write_recal_bam(*args):
@@ -106,23 +103,26 @@ def split_variants_by_sample(*args):
 def piped_bamprep(*args):
     with _setup_logging(args):
         return apply(bamprep.piped_bamprep, *args)
-piped_bamprep.metadata = {"resources": ["gatk"]}
 
 @require(variation)
 def postprocess_variants(*args):
     with _setup_logging(args):
         return apply(variation.postprocess_variants, *args)
-postprocess_variants.metadata = {"resources": ["gatk-vqsr", "gatk", "snpEff"]}
 
 @require(qcsummary)
 def pipeline_summary(*args):
     with _setup_logging(args):
         return apply(qcsummary.pipeline_summary, *args)
 
-@require(sample)
+@require(rnaseq)
 def generate_transcript_counts(*args):
     with _setup_logging(args):
-        return apply(sample.generate_transcript_counts, *args)
+        return apply(rnaseq.generate_transcript_counts, *args)
+
+@require(rnaseq)
+def run_cufflinks(*args):
+    with _setup_logging(args):
+        return apply(rnaseq.run_cufflinks, *args)
 
 @require(sample)
 def generate_bigwig(*args):
@@ -134,11 +134,15 @@ def combine_bam(*args):
     with _setup_logging(args):
         return apply(shared.combine_bam, *args)
 
+@require(callable)
+def combine_sample_regions(*args):
+    with _setup_logging(args):
+        return apply(callable.combine_sample_regions, *args)
+
 @require(genotype)
 def variantcall_sample(*args):
     with _setup_logging(args):
         return apply(genotype.variantcall_sample, *args)
-variantcall_sample.metadata = {"resources": ["gatk", "freebayes", "gatk-haplotype"]}
 
 @require(vcfutils)
 def combine_variant_files(*args):
@@ -150,11 +154,15 @@ def concat_variant_files(*args):
     with _setup_logging(args):
         return apply(vcfutils.concat_variant_files, *args)
 
+@require(vcfutils)
+def merge_variant_files(*args):
+    with _setup_logging(args):
+        return apply(vcfutils.merge_variant_files, *args)
+
 @require(population)
 def prep_gemini_db(*args):
     with _setup_logging(args):
         return apply(population.prep_gemini_db, *args)
-prep_gemini_db.metadata = {"resources": ["gemini"]}
 
 @require(structural)
 def detect_sv(*args):
@@ -175,7 +183,6 @@ def compare_to_rm(*args):
 def coverage_summary(*args):
     with _setup_logging(args):
         return apply(coverage.summary, *args)
-coverage_summary.metadata = {"resources": ["bcbio_coverage"]}
 
 @require(disambiguate)
 def run_disambiguate(*args):

@@ -78,8 +78,7 @@ information about the pipeline. To run the analysis:
      NISTIntegratedCalls_13datasets_130719_allcall_UGHapMerge_HetHomVarPASS_VQSRv2.17_all_nouncert_excludesimplerep_excludesegdups_excludedecoy_excludeRepSeqSTRs_noCNVs.vcf.gz
     wget ftp://ftp-trace.ncbi.nih.gov/giab/ftp/data/NA12878/variant_calls/NIST/\
      union13callableMQonlymerged_addcert_nouncert_excludesimplerep_excludesegdups_excludedecoy_excludeRepSeqSTRs_noCNVs_v2.17.bed.gz
-    gunzip *.vcf.gz
-    gunzip *.bed.gz
+    gunzip *.vcf.gz *.bed.gz
 
 - Retrieve configuration input file::
 
@@ -131,12 +130,11 @@ Then the fastq reads, reference materials and analysis regions::
      NISTIntegratedCalls_13datasets_130719_allcall_UGHapMerge_HetHomVarPASS_VQSRv2.17_all_nouncert_excludesimplerep_excludesegdups_excludedecoy_excludeRepSeqSTRs_noCNVs.vcf.gz
     wget ftp://ftp-trace.ncbi.nih.gov/giab/ftp/data/NA12878/variant_calls/NIST/\
      union13callableMQonlymerged_addcert_nouncert_excludesimplerep_excludesegdups_excludedecoy_excludeRepSeqSTRs_noCNVs_v2.17.bed.gz
-    gunzip *.vcf.gz
-    gunzip *.bed.gz
+    gunzip *.vcf.gz *.bed.gz
 
 Finally run the analysis, distributed on 8 local cores, with::
 
-    mkdir work && cd work
+    cd .. & mkdir work && cd work
     bcbio_nextgen.py ../config/NA12878-exome-methodcmp.yaml -n 8
 
 The ``grading-summary.csv`` contains detailed comparisons of the results
@@ -145,6 +143,35 @@ to the NIST reference materials, enabling rapid comparisons of methods.
 .. _combined ensemble callset: http://bcbio.wordpress.com/2013/02/06/an-automated-ensemble-method-for-combining-and-evaluating-genomic-variants-from-multiple-callers/
 .. _Genome in a Bottle: http://www.genomeinabottle.org/
 .. _EdgeBio's: http://www.edgebio.com/
+
+Cancer tumor normal
+~~~~~~~~~~~~~~~~~~~
+
+This example calls variants in a paired cancer sample with tumor/normal
+sequencing data. using raw data from `Han et al in PLoS One
+<http://www.plosone.org/article/info:doi/10.1371/journal.pone.0064271>`_. This
+is a work in progress and we welcome contributions. The goal is to use a full
+evaluation dataset to compare calling methods:
+
+Get the input configuration file::
+
+    mkdir config && cd config
+    wget https://raw.github.com/chapmanb/bcbio-nextgen/master/config/\
+     examples/cancer-paired.yaml
+
+Get fastq reads and analysis regions::
+
+    cd .. && mkdir input && cd input
+    wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR256/ERR256785/ERR256785_1.fastq.gz
+    wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR256/ERR256785/ERR256785_2.fastq.gz
+    wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR256/ERR256786/ERR256786_1.fastq.gz
+    wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR256/ERR256786/ERR256786_2.fastq.gz
+    wget https://gist.github.com/chapmanb/8322238/raw/131a5710ac17039e8e2d350e00a88898e030a958/ERP002442-targeted.bed
+
+Run::
+
+    cd .. & mkdir work && cd work
+    bcbio_nextgen.py ../config/cancer-paired.yaml -n 8
 
 Test suite
 ==========

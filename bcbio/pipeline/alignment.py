@@ -7,7 +7,7 @@ import os
 
 from Bio.SeqIO.QualityIO import FastqGeneralIterator
 
-from bcbio import bam, broad, utils
+from bcbio import bam, utils
 from bcbio.bam import cram
 from bcbio.distributed.transaction import file_transaction
 from bcbio.ngsalign import (bowtie, bwa, tophat, bowtie2, mosaik,
@@ -22,29 +22,28 @@ from bcbio.ngsalign import (bowtie, bwa, tophat, bowtie2, mosaik,
 #  from galaxy_loc_file and find the actual location of the index file.
 #  This is useful for indexes that don't have an associated location file
 #  but are stored in the same directory structure.
-NgsTool = namedtuple("NgsTool", ["align_fn", "pipe_align_fn", "bam_align_fn",
-                                 "galaxy_loc_file", "remap_index_fn", "can_pipe"])
+NgsTool = namedtuple("NgsTool", ["align_fn", "bam_align_fn",
+                                 "galaxy_loc_file", "remap_index_fn"])
+
 
 BASE_LOCATION_FILE = "sam_fa_indices.loc"
 
 TOOLS = {
-    "bowtie": NgsTool(bowtie.align, None, None, bowtie.galaxy_location_file, None, None),
-    "bowtie2": NgsTool(bowtie2.align, None, None, bowtie2.galaxy_location_file, bowtie2.remap_index_fn,
-                       None),
-    "bwa": NgsTool(bwa.align, bwa.align_pipe, bwa.align_bam, bwa.galaxy_location_file, None,
-                   bwa.can_pipe),
-    "mosaik": NgsTool(mosaik.align, None, None, mosaik.galaxy_location_file, None,
-                      None),
-    "novoalign": NgsTool(novoalign.align, novoalign.align_pipe, novoalign.align_bam,
-                         novoalign.galaxy_location_file, novoalign.remap_index_fn, novoalign.can_pipe),
+    "bowtie": NgsTool(bowtie.align, None, bowtie.galaxy_location_file, None),
+    "bowtie2": NgsTool(bowtie2.align, None,
+                       bowtie2.galaxy_location_file, bowtie2.remap_index_fn),
+    "bwa": NgsTool(bwa.align_pipe, bwa.align_bam, bwa.galaxy_location_file, None),
+    "mosaik": NgsTool(mosaik.align, None, mosaik.galaxy_location_file, None),
+    "novoalign": NgsTool(novoalign.align_pipe, novoalign.align_bam,
+                         novoalign.galaxy_location_file, novoalign.remap_index_fn),
     "novoalignCS": NgsTool(novoalignCS.align, novoalignCS.align_pipe, novoalignCS.align_bam,
                         novoalignCS.galaxy_location_file, novoalignCS.remap_index_fn, novoalignCS.can_pipe),
-    "tophat": NgsTool(tophat.align, None, None, bowtie2.galaxy_location_file, bowtie2.remap_index_fn,
-                      None),
-    "samtools": NgsTool(None, None, None, BASE_LOCATION_FILE, None, None),
-    "star": NgsTool(star.align, None, None, None, star.remap_index_fn, None),
-    "tophat2": NgsTool(tophat.align, None, None, bowtie2.galaxy_location_file, bowtie2.remap_index_fn,
-                      None)}
+    "tophat": NgsTool(tophat.align, None,
+                      bowtie2.galaxy_location_file, bowtie2.remap_index_fn),
+    "samtools": NgsTool(None, None, BASE_LOCATION_FILE, None),
+    "star": NgsTool(star.align, None, None, star.remap_index_fn),
+    "tophat2": NgsTool(tophat.align, None,
+                       bowtie2.galaxy_location_file, bowtie2.remap_index_fn)}
 
 metadata = {"support_bam": [k for k, v in TOOLS.iteritems() if v.bam_align_fn is not None]}
 
@@ -57,26 +56,17 @@ def align_to_sort_bam(fastq1, fastq2, aligner, data):
         align_dir_parts.append(data["disambiguate"]["genome_build"])
     align_dir = utils.safe_makedir(apply(os.path.join, align_dir_parts))
     if fastq1.endswith(".bam"):
-        out_bam = _align_from_bam(fastq1, aligner, data["align_ref"], data["sam_ref"],
+        out_bam = _align_from_bam(fastq1, aligner, utils.get_in(data, ("reference", aligner, "base")),
+                                  utils.get_in(data, ("reference", "fasta", "base")),
                                   names, align_dir, data)
         data["work_bam"] = out_bam
-    elif _can_pipe(aligner, fastq1):
-        data = _align_from_fastq_pipe(fastq1, fastq2, aligner, data["align_ref"], data["sam_ref"],
-                                      names, align_dir, data)
     else:
-        out_bam = _align_from_fastq(fastq1, fastq2, aligner, data["align_ref"], data["sam_ref"],
-                                    names, align_dir, data)
-        data["work_bam"] = out_bam
+        data = _align_from_fastq(fastq1, fastq2, aligner, utils.get_in(data, ("reference", aligner, "base")),
+                                 utils.get_in(data, ("reference", "fasta", "base")),
+                                 names, align_dir, data)
     if data["work_bam"] and utils.file_exists(data["work_bam"]):
         bam.index(data["work_bam"], data["config"])
     return data
-
-def _can_pipe(aligner, fastq_file):
-    """Check if current aligner support piping for a particular input fastq file.
-    """
-    if TOOLS[aligner].can_pipe and TOOLS[aligner].pipe_align_fn:
-        return TOOLS[aligner].can_pipe(fastq_file)
-    return False
 
 def _align_from_fastq_pipe(fastq1, fastq2, aligner, align_ref, sam_ref, names, align_dir, data):
     """Align longer reads using new piped strategies that avoid disk IO.
@@ -103,19 +93,18 @@ def _align_from_fastq(fastq1, fastq2, aligner, align_ref, sam_ref, names,
                       align_dir, data):
     """Align from fastq inputs, producing sorted BAM output.
     """
-    assert not data.get("align_split"), "Do not handle split alignments with non-piped fastq yet"
     config = data["config"]
     align_fn = TOOLS[aligner].align_fn
-    sam_file = align_fn(fastq1, fastq2, align_ref, names["lane"], align_dir, data,
-                        names=names)
-    if fastq2 is None and aligner in ["bwa", "bowtie2", "tophat2"]:
-        fastq1 = _remove_read_number(fastq1, sam_file)
-    sort_method = config["algorithm"].get("bam_sort", "coordinate")
-
-    if sort_method == "queryname":
-        return sam_to_querysort_bam(sam_file, config)
+    out = align_fn(fastq1, fastq2, align_ref, names, align_dir, data)
+    # handle align functions that update the main data dictionary in place
+    if isinstance(out, dict):
+        assert "work_bam" in out
+        return out
+    # handle output of raw SAM files that need to be converted to BAM
     else:
-        return sam_to_sort_bam(sam_file, sam_ref, fastq1, fastq2, names, config)
+        work_bam = bam.sam_to_bam(out, config)
+        data["work_bam"] = bam.sort(work_bam, config)
+        return data
 
 def _remove_read_number(in_file, sam_file):
     """Work around problem with MergeBamAlignment with BWA and single end reads.
@@ -145,45 +134,3 @@ def _remove_read_number(in_file, sam_file):
                             name = name.rsplit("/", 1)[0]
                             out_handle.write("@%s\n%s\n+\n%s\n" % (name, seq, qual))
     return out_file
-
-def sam_to_querysort_bam(sam_file, config):
-    """Convert SAM file directly to a query sorted BAM without merging of FASTQ reads.
-
-    This allows merging of multiple mappers which do not work with MergeBamAlignment.
-    """
-    runner = broad.runner_from_config(config)
-    out_file = "{}-querysorted.bam".format(os.path.splitext(sam_file)[0])
-    return runner.run_fn("picard_sort", sam_file, "queryname", out_file)
-
-def sam_to_querysort_sam(sam_file, config):
-    """Convert SAM file directly to a query sorted SAM without merging of FASTQ reads.
-
-    This allows merging of multiple mappers which do not work with MergeBamAlignment.
-    """
-    runner = broad.runner_from_config(config)
-    out_file = "{}-querysorted.sam".format(os.path.splitext(sam_file)[0])
-    return runner.run_fn("picard_sort", sam_file, "queryname", out_file)
-
-def sam_to_sort_bam(sam_file, ref_file, fastq1, fastq2, names, config):
-    """Convert SAM file to merged and sorted BAM file.
-    """
-    picard = broad.runner_from_config(config)
-    base_dir = os.path.dirname(sam_file)
-
-    picard.run_fn("picard_index_ref", ref_file)
-    out_fastq_bam = picard.run_fn("picard_fastq_to_bam", fastq1, fastq2, base_dir, names)
-    out_bam = picard.run_fn("picard_sam_to_bam", sam_file, out_fastq_bam, ref_file,
-                            fastq2 is not None)
-    sort_bam = picard.run_fn("picard_sort", out_bam)
-
-    utils.save_diskspace(sam_file, "SAM converted to BAM", config)
-    utils.save_diskspace(out_fastq_bam, "Combined into output BAM %s" % out_bam, config)
-    utils.save_diskspace(out_bam, "Sorted to %s" % sort_bam, config)
-    # merge FASTQ files, only if barcoded samples in the work directory
-    if (os.path.commonprefix([fastq1, sort_bam]) ==
-             os.path.split(os.path.dirname(sort_bam))[0]
-          and not config["algorithm"].get("upload_fastq", True)):
-        utils.save_diskspace(fastq1, "Merged into output BAM %s" % out_bam, config)
-        if fastq2:
-            utils.save_diskspace(fastq2, "Merged into output BAM %s" % out_bam, config)
-    return sort_bam

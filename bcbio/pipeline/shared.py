@@ -3,10 +3,13 @@
 import os
 from contextlib import closing
 
-import pybedtools
+try:
+    import pybedtools
+except ImportError:
+    pybedtools = None
 import pysam
 
-from bcbio import bam, broad
+from bcbio import bam, broad, utils
 from bcbio.pipeline import config_utils
 from bcbio.utils import file_exists, safe_makedir, save_diskspace
 from bcbio.distributed.transaction import file_transaction
@@ -118,10 +121,11 @@ def _rewrite_bed_with_chrom(in_file, out_file, chrom):
                 if line.startswith("%s\t" % chrom):
                     out_handle.write(line)
 
+
 def _subset_bed_by_region(in_file, out_file, region):
     orig_bed = pybedtools.BedTool(in_file)
     region_bed = pybedtools.BedTool("\t".join(str(x) for x in region) + "\n", from_string=True)
-    orig_bed.intersect(region_bed).saveas(out_file)
+    orig_bed.intersect(region_bed).filter(lambda x: len(x) > 5).merge().saveas(out_file)
 
 def subset_variant_regions(variant_regions, region, out_file):
     """Return BED file subset by a specified chromosome region.
@@ -136,13 +140,11 @@ def subset_variant_regions(variant_regions, region, out_file):
     elif not isinstance(region, (list, tuple)) and region.find(":") > 0:
         raise ValueError("Partial chromosome regions not supported")
     else:
-        subset_file = "{0}-regions.bed".format(os.path.splitext(out_file)[0])
+        subset_file = "{0}-regions.bed".format(utils.splitext_plus(out_file)[0])
         if not os.path.exists(subset_file):
             with file_transaction(subset_file) as tx_subset_file:
                 if isinstance(region, (list, tuple)):
-                    c, s, e = region
-                    safe_region = [c, s, e - 2]
-                    _subset_bed_by_region(variant_regions, tx_subset_file, safe_region)
+                    _subset_bed_by_region(variant_regions, tx_subset_file, region)
                 else:
                     _rewrite_bed_with_chrom(variant_regions, tx_subset_file, region)
         if os.path.getsize(subset_file) == 0:

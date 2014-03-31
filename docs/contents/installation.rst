@@ -47,14 +47,28 @@ use ``https://`` globally instead of ``git://``::
 
 The automated installer creates a fully integrated environment that
 allows simultaneous updates of the framework, third party tools and
-biological data. This offer the advantage over manual installation of
+biological data. This offers the advantage over manual installation of
 being able to manage and evolve a consistent analysis environment as
 algorithms continue to evolve and improve. The installer is flexible
 enough to handle both system integrations into standard directories
 like /usr/local, as well as custom isolated installations in non-root
 directories. The :ref:`upgrade-install` section has additional
-documentation on including additional genome data and software as part
-of your system, and keeping everything up to date.
+documentation on including additional genome data, and the section on
+:ref:`toolplus-install` describes how to add commercially restricted software
+like GATK.
+
+Troubleshooting
+===============
+
+ImportError: No module named conda.cli
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Having a PYTHONHOME or PYTHONPATH set can cause installation troubles,
+if you are seeing an error like the above, unsetting these two environment
+variables will help. Fix that with::
+
+    $ unset PYTHONHOME
+    $ unset PYTHONPATH
+
 
 .. _isolated-install:
 
@@ -72,7 +86,7 @@ This requires the following additional system requirements to be in place:
 - R with Rscript (currently optional, but increasingly used in the pipeline)
 - bzip2 (with development libraries)
 - zlib (with development libraries)
-- cmake (temporary requirement, for eventual removal)
+- curl (with development libraries)
 
 Installing this way is as isolated and self-contained as possible
 without virtual machines or lightweight system containers. To ensure
@@ -82,6 +96,64 @@ your `~/.bashrc` with::
     export PATH=/path_to_bcbio/bin:$PATH
     export LD_LIBRARY_PATH=/path_to_bcbio/lib:$LD_LIBRARY_PATH
     export PERL5LIB=/path_to_bcbio/lib/perl5:/path_to_bcbio/perl5/site_perl:${PERL5LIB}
+
+This installation process is not easily re-locatable due to absolute
+filesystem pointers within the installation directory. We plan to move
+towards utilizing `Docker`_ containers to provide a fully isolated software
+installation.
+
+.. _Docker: http://www.docker.io/
+
+.. _toolplus-install:
+
+Non-distributable software
+==========================
+
+We're not able to automatically install some useful tools due to licensing
+restrictions, so provide a mechanism to manually download and add these to
+bcbio-nextgen during an upgrade with the ``--toolplus`` command line.
+
+GATK and muTect
+~~~~~~~~~~~~~~~
+
+Calling variants with GATK's HaplotypeCaller or UnifiedGenotyper requires manual
+installation of the latest GATK release. This is freely available for academic
+users, but requires a manual download from the `GATK download`_ site.  Appistry
+provides `a distribution of GATK for commercial users`_.  We distribute the last
+freely available GATK-lite release (2.3.9) as part of the automated install but
+don't recommend using this for calling. If you don't want to use the restricted
+GATK version, freely available callers like FreeBayes provide a better
+alternative than older GATK versions. See the `FreeBayes and GATK comparison`_
+for a full evaluation.
+
+To install GATK, download and unzip the latest version from the GATK or Appistry
+distributions. Then make this jar available to bcbio-nextgen with::
+
+    bcbio_nextgen.py upgrade --tools --toolplus gatk=/path/to/gatk/GenomeAnalysisTK.jar
+
+This will copy the jar and update your bcbio_system.yaml and manifest files to
+reflect the new version.
+
+For muTect, we provide the latest 1.1.5 jar, but commercial users need to obtain
+the Appistry muTect distribution. To make this jar available to bcbio-nextgen::
+
+    bcbio_nextgen.py upgrade --tools --toolplus mutect=/path/to/appistry/muTect-1.1.5.jar
+
+Note that muTect does not provide an easy way to query for the current version,
+so your input jar needs to include the version in the name.
+
+GEMINI
+~~~~~~
+
+``-- toolplus`` is also used to install data rich supplemental software which is
+not installed by default such as GEMINI. We're making changes to automatically
+include these tools in the default install, but for now include  GEMINI with::
+
+    bcbio_nextgen.py upgrade --tools --toolplus data
+
+.. _GATK download: http://www.broadinstitute.org/gatk/download
+.. _a distribution of GATK for commercial users: http://www.appistry.com/gatk
+.. _FreeBayes and GATK comparison: http://bcbio.wordpress.com/2013/10/21/updated-comparison-of-variant-detection-methods-ensemble-freebayes-and-minimal-bam-preparation-pipelines/
 
 .. _upgrade-install:
 
@@ -102,22 +174,15 @@ Tune the upgrade with these options:
   gets the most recent released version and ``development``
   retrieves the latest code from GitHub.
 
-- ``--toolplus`` Specify additional categories of tools to include.
-  These may require manual intervention or be data intensive. You can
-  specify the argument multiple times to include multiple extra
-  classes of tools. Available choices are:
-
-  - ``protected`` Install software that requires licensing for
-    commerical use. This includes the latest versions of GATK, which
-    need a manual download from the GATK website. The installer
-    provides full directions.
-  - ``data`` Data rich supplemental tools. A good example is
-    GEMINI, which provides rich annotation of variant calls
-    but requires download of external data sources.
+- ``--toolplus`` Specify additional tools to include. See the section on
+  :ref:`toolplus-install` for more details.
 
 - ``--genomes`` and ``--aligners`` options add additional aligner
   indexes to download and prepare. By default we prepare a minimal
-  human genome setup.
+  human genome setup. If you want to install multiple genomes or
+  aligners at once, specify ``--genomes`` or ``--aligners``
+  multiple times, like this:
+  ``--genomes GRCh38 --genomes GRCh37 --aligners bwa --aligners bowtie2``
 
 - Leave out the ``--tools`` option if you don't want to upgrade third
   party tools. If using ``--tools``, it will use the same installation
@@ -188,6 +253,8 @@ programs and libraries locally instead of globally, `virtualenv`_
 creates an isolated, local Python installation that does not require
 system install privileges.
 
+.. _virtualenv: http://www.virtualenv.org/en/latest/
+
 Tool Requirements
 ~~~~~~~~~~~~~~~~~
 
@@ -200,41 +267,17 @@ for both software and associated data files::
 
 You can also install them manually, adjusting locations in the
 ``resources`` section of your ``bcbio_system.yaml`` configuration file
-as needed.
+as needed.  The CloudBioLinux infrastructure provides a full list of third party
+software installed with bcbio-nextgen:
 
--  An aligner: we support multiple aligners, including `bwa`_,
-   `novoalign`_ and `bowtie2`_
--  `Picard`_ -- BAM manipulation and processing
--  `FastQC`_ -- Generation of sequencing quality reports
--  `GATK`_ -- Variant calling and BAM preparation
--  `snpEff`_ -- Identify functional consequences of variants.
+- `packages-homebrew.yaml`_ -- All third party tools installed through the
+  Homebrew/Linuxbrew package manager.
+- `custom.yaml`_ -- All third party tools installed via CloudBioLinux's custom
+  installation procedure.
 
-The code uses a number of Python modules, installed with the code:
-
--  `biopython`_
--  `pysam`_
--  `ipython`_
--  `sh`_
--  `PyYAML`_
--  `logbook`_
-
-.. _bwa: http://bio-bwa.sourceforge.net/
-.. _bowtie2: http://bowtie-bio.sourceforge.net/bowtie2/index.shtml
-.. _novoalign: http://www.novocraft.com
-.. _Picard: http://picard.sourceforge.net/
-.. _FastQC: http://www.bioinformatics.bbsrc.ac.uk/projects/fastqc/
-.. _GATK: http://www.broadinstitute.org/gatk/
-.. _snpEff: http://sourceforge.net/projects/snpeff/
-.. _biopython: http://biopython.org
-.. _pysam: http://code.google.com/p/pysam/
-.. _PyYAML: http://pyyaml.org/
-.. _logbook: http://packages.python.org/Logbook
-.. _numpy: http://www.numpy.org/
 .. _CloudBioLinux: http://cloudbiolinux.org
-.. _virtualenv: http://www.virtualenv.org/en/latest/
-.. _ipython: http://ipython.org/
-.. _sh: http://amoffat.github.com/sh/
-
+.. _packages-homebrew.yaml: https://github.com/chapmanb/cloudbiolinux/blob/master/contrib/flavor/ngs_pipeline_minimal/packages-homebrew.yaml
+.. _custom.yaml : https://github.com/chapmanb/cloudbiolinux/blob/master/contrib/flavor/ngs_pipeline_minimal/custom.yaml
 
 .. _data-requirements:
 
@@ -311,4 +354,3 @@ automatically::
 
 .. _fabricrc.txt: https://github.com/chapmanb/cloudbiolinux/blob/master/config/fabricrc.txt
 .. _biodata.yaml: https://github.com/chapmanb/cloudbiolinux/blob/master/config/biodata.yaml
-

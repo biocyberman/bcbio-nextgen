@@ -1,5 +1,6 @@
 """Helpful utilities for building analysis pipelines.
 """
+import gzip
 import os
 import tempfile
 import time
@@ -171,9 +172,9 @@ def curdir_tmpdir(remove=True, base_dir=None):
     safe_makedir(tmp_dir_base)
     tmp_dir = tempfile.mkdtemp(dir=tmp_dir_base)
     safe_makedir(tmp_dir)
-    try :
+    try:
         yield tmp_dir
-    finally :
+    finally:
         if remove:
             try:
                 shutil.rmtree(tmp_dir)
@@ -189,9 +190,9 @@ def chdir(new_dir):
     cur_dir = os.getcwd()
     safe_makedir(new_dir)
     os.chdir(new_dir)
-    try :
+    try:
         yield
-    finally :
+    finally:
         os.chdir(cur_dir)
 
 @contextlib.contextmanager
@@ -252,6 +253,42 @@ def add_full_path(dirname, basedir=None):
         dirname = os.path.join(basedir, dirname)
     return dirname
 
+def splitext_plus(f):
+    """Split on file extensions, allowing for zipped extensions.
+    """
+    base, ext = os.path.splitext(f)
+    if ext in [".gz", ".bz2", ".zip"]:
+        base, ext2 = os.path.splitext(base)
+        ext = ext2 + ext
+    return base, ext
+
+def remove_safe(f):
+    try:
+        os.remove(f)
+    except OSError:
+        pass
+
+def symlink_plus(orig, new):
+    """Create relative symlinks and handle associated biological index files.
+    """
+    for ext in ["", ".idx", ".gbi", ".tbi", ".bai"]:
+        if os.path.exists(orig + ext) and (not os.path.lexists(new + ext) or not os.path.exists(new + ext)):
+            with chdir(os.path.dirname(new)):
+                remove_safe(new + ext)
+                os.symlink(os.path.relpath(orig + ext), os.path.basename(new + ext))
+                # Work around symlink issues on some filesystems. Randomly fail to symlink.
+                if not os.path.exists(new + ext) or not os.path.lexists(new + ext):
+                    remove_safe(new + ext)
+                    shutil.copyfile(orig + ext, new + ext)
+    orig_noext = splitext_plus(orig)[0]
+    new_noext = splitext_plus(new)[0]
+    for sub_ext in [".bai"]:
+        if os.path.exists(orig_noext + sub_ext) and not os.path.lexists(new_noext + sub_ext):
+            with chdir(os.path.dirname(new_noext)):
+                os.symlink(os.path.relpath(orig_noext + sub_ext), os.path.basename(new_noext + sub_ext))
+
+def open_gzipsafe(f):
+    return gzip.open(f) if f.endswith(".gz") else open(f)
 
 def append_stem(to_transform, word):
     """
@@ -262,13 +299,9 @@ def append_stem(to_transform, word):
 
     """
     if is_sequence(to_transform):
-        transformed = []
-        for f in to_transform:
-            (base, ext) = os.path.splitext(f)
-            transformed.append("".join([base, word, ext]))
-        return transformed
+        return [append_stem(f, word) for f in to_transform]
     elif is_string(to_transform):
-        (base, ext) = os.path.splitext(to_transform)
+        (base, ext) = splitext_plus(to_transform)
         return "".join([base, word, ext])
     else:
         raise ValueError("append_stem takes a single filename as a string or "
@@ -489,3 +522,14 @@ def reservoir_sample(stream, num_items, item_parser=lambda x: x):
 
 def compose(f, g):
     return lambda x: f(g(x))
+
+def dictapply(d, fn):
+    """
+    apply a function to all non-dict values in a dictionary
+    """
+    for k, v in d.items():
+        if isinstance(v, dict):
+            v = dictapply(v, fn)
+        else:
+            d[k] = fn(v)
+    return d

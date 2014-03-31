@@ -1,6 +1,7 @@
 """Read genome build configurations from Galaxy *.loc and bcbio-nextgen resource files.
 """
 import ConfigParser
+import glob
 import os
 from xml.etree import ElementTree
 
@@ -23,11 +24,16 @@ def get_resources(genome, ref_file):
                       % (genome, resource_file))
     with open(resource_file) as in_handle:
         resources = yaml.load(in_handle)
-    for cat in resources.keys():
-        resources[cat] = abs_file_paths(resources[cat], base_dir)
-    return resources
+
+    def resource_file_path(x):
+        if isinstance(x, basestring) and os.path.exists(os.path.join(base_dir, x)):
+            return os.path.normpath(os.path.join(base_dir, x))
+        return x
+
+    return utils.dictapply(resources, resource_file_path)
 
 # ## Utilities
+
 
 def abs_file_paths(xs, base_dir=None, ignore_keys=None):
     """Normalize any file paths found in a subdirectory of configuration input.
@@ -109,10 +115,9 @@ def _get_ref_from_galaxy_loc(name, genome_build, loc_file, galaxy_dt, need_remap
             if dbkey == genome_build]
     if len(refs) == 0:
         raise IndexError("Genome %s not found in %s" % (genome_build, loc_file))
-    elif len(refs) > 1:
-        raise IndexError("Genome %s found multiple times in %s" % (genome_build, loc_file))
+    # allow multiple references in a file and use the most recently added
     else:
-        cur_ref = refs[0]
+        cur_ref = refs[-1]
     if need_remap:
         remap_fn = alignment.TOOLS[name].remap_index_fn
         assert remap_fn is not None, "%s requires remapping function from base location file" % name
@@ -148,28 +153,26 @@ def _get_galaxy_data_table(name, dt_config_file):
 def get_refs(genome_build, aligner, galaxy_base):
     """Retrieve the reference genome file location from galaxy configuration.
     """
-    if not genome_build:
-        return (None, None)
-    galaxy_config = _get_galaxy_tool_info(galaxy_base)
-    out_info = []
-    for name in [aligner, "samtools"]:
-        if not name:
-            out_info.append(None)
-            continue
-        galaxy_dt = _get_galaxy_data_table(name, galaxy_config["tool_data_table_config_path"])
-        loc_file, need_remap = _get_galaxy_loc_file(name, galaxy_dt, galaxy_config["tool_data_path"],
-                                                    galaxy_base)
-        cur_ref = _get_ref_from_galaxy_loc(name, genome_build, loc_file, galaxy_dt, need_remap)
-        out_info.append(utils.add_full_path(cur_ref, galaxy_config["tool_data_path"]))
-
-    if len(out_info) != 2:
-        raise ValueError("Did not find genome reference for %s %s" %
-                         (genome_build, aligner))
-    else:
-        return tuple(out_info)
+    out = {}
+    name_remap = {"samtools": "fasta"}
+    if genome_build:
+        galaxy_config = _get_galaxy_tool_info(galaxy_base)
+        for name in [x for x in (aligner, "samtools") if x]:
+            galaxy_dt = _get_galaxy_data_table(name, galaxy_config["tool_data_table_config_path"])
+            loc_file, need_remap = _get_galaxy_loc_file(name, galaxy_dt, galaxy_config["tool_data_path"],
+                                                        galaxy_base)
+            cur_ref = _get_ref_from_galaxy_loc(name, genome_build, loc_file, galaxy_dt, need_remap)
+            base = os.path.normpath(utils.add_full_path(cur_ref, galaxy_config["tool_data_path"]))
+            indexes = glob.glob("%s*" % utils.splitext_plus(base)[0])
+            if base in indexes:
+                indexes.remove(base)
+            out[name_remap.get(name, name)] = {"base": base, "indexes": indexes}
+    return out
 
 def get_builds(galaxy_base):
     """Retrieve configured genome builds and reference files, using Galaxy configuration files.
+
+    Allows multiple dbkey specifications in the same file, using the most recently added.
     """
     name = "samtools"
     galaxy_config = _get_galaxy_tool_info(galaxy_base)
@@ -177,4 +180,10 @@ def get_builds(galaxy_base):
     loc_file, need_remap = _get_galaxy_loc_file(name, galaxy_dt, galaxy_config["tool_data_path"],
                                                 galaxy_base)
     assert not need_remap, "Should not need to remap reference files"
-    return _galaxy_loc_iter(loc_file, galaxy_dt)
+    fnames = {}
+    for dbkey, fname in _galaxy_loc_iter(loc_file, galaxy_dt):
+        fnames[dbkey] = fname
+    out = []
+    for dbkey in sorted(fnames.keys()):
+        out.append((dbkey, fnames[dbkey]))
+    return out

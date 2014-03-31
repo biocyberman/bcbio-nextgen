@@ -3,11 +3,11 @@
 Handles configured ploidy, with custom handling for sex chromosomes and pooled
 haploid mitochondrial DNA.
 """
-import os
 import re
 
 from bcbio import utils
 from bcbio.distributed.transaction import file_transaction
+from bcbio.variation import vcfutils
 
 def chromosome_special_cases(chrom):
     if chrom in ["MT", "M", "chrM", "chrMT"]:
@@ -87,14 +87,21 @@ def filter_vcf_by_sex(vcf_file, data):
 
     Handles sex chromosomes and mitochondrial. Does not try to resolve called
     hets into potential homozygotes when converting diploid to haploid.
+
+    Skips filtering on cancer samples. Since these will be pooled, need special
+    functionality to handle them
     """
+    if vcfutils.get_paired_phenotype(data):
+        return vcf_file
     _, sexes = _configured_ploidy_sex([data])
     sex = sexes.pop()
-    out_file = "%s-ploidyfix%s" % os.path.splitext(vcf_file)
+    out_file = "%s-ploidyfix%s" % utils.splitext_plus(vcf_file)
     if not utils.file_exists(out_file):
+        orig_out_file = out_file
+        out_file = orig_out_file.replace(".vcf.gz", ".vcf")
         with file_transaction(out_file) as tx_out_file:
             with open(tx_out_file, "w") as out_handle:
-                with open(vcf_file) as in_handle:
+                with utils.open_gzipsafe(vcf_file) as in_handle:
                     for line in in_handle:
                         if line.startswith("#"):
                             out_handle.write(line)
@@ -102,4 +109,6 @@ def filter_vcf_by_sex(vcf_file, data):
                             line = _fix_line_ploidy(line, sex)
                             if line:
                                 out_handle.write(line)
+        if orig_out_file.endswith(".gz"):
+            out_file = vcfutils.bgzip_and_index(out_file, data["config"])
     return out_file

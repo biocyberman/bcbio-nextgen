@@ -7,6 +7,7 @@ for human variant calling.
 
 Requires: git, Python 2.7 or argparse for earlier versions.
 """
+import collections
 import contextlib
 import datetime
 import os
@@ -18,10 +19,11 @@ import urllib2
 
 remotes = {"requirements":
            "https://raw.github.com/chapmanb/bcbio-nextgen/master/requirements.txt",
+           "gitrepo": "git://github.com/chapmanb/bcbio-nextgen.git",
            "system_config":
            "https://raw.github.com/chapmanb/bcbio-nextgen/master/config/bcbio_system.yaml",
            "anaconda":
-           "http://repo.continuum.io/miniconda/Miniconda-2.2.2-%s-x86_64.sh"}
+           "http://repo.continuum.io/miniconda/Miniconda-3.0.0-%s-x86_64.sh"}
 
 def main(args, sys_argv):
     check_dependencies()
@@ -33,9 +35,10 @@ def main(args, sys_argv):
         install_conda_pkgs(anaconda)
         bcbio = bootstrap_bcbionextgen(anaconda, args, remotes)
     print("Installing data and third party dependencies")
-    subprocess.check_call([bcbio["bcbio_nextgen.py"], "upgrade"] + _clean_args(sys_argv, args, bcbio))
     system_config = write_system_config(remotes["system_config"], args.datadir,
                                         args.tooldir)
+    setup_manifest(args.datadir)
+    subprocess.check_call([bcbio["bcbio_nextgen.py"], "upgrade"] + _clean_args(sys_argv, args, bcbio))
     print("Finished: bcbio-nextgen, tools and data installed")
     print(" Genome data installed in:\n  %s" % args.datadir)
     if args.tooldir:
@@ -64,6 +67,9 @@ def bootstrap_bcbionextgen(anaconda, args, remotes):
     """
     subprocess.check_call([anaconda["pip"], "install", "fabric"])
     subprocess.check_call([anaconda["pip"], "install", "-r", remotes["requirements"]])
+    if args.upgrade == "development":
+        subprocess.check_call([anaconda["pip"], "install", "--upgrade", "--no-deps",
+                               "git+%s#egg=bcbio-nextgen" % remotes["gitrepo"]])
     out = {}
     for script in ["bcbio_nextgen.py"]:
         ve_script = os.path.join(anaconda["dir"], "bin", script)
@@ -81,14 +87,12 @@ def bootstrap_bcbionextgen(anaconda, args, remotes):
 
 def install_conda_pkgs(anaconda):
     pkgs = ["biopython", "boto", "cython", "ipython", "lxml", "matplotlib",
-            "nose", "numpy", "pycrypto", "pip", "pysam", "pyyaml", "pyzmq", "requests",
-            "tornado", "statsmodels"]
-    subprocess.check_call([anaconda["conda"], "install", "--yes"] + pkgs)
-    # Remove until can get 13.1.0 working cleanly on CentOS
-    #extra_pkgs = ["zeromq", "pyzmq"]
-    #binstar_user = "minrk"
-    #subprocess.check_call([anaconda["conda"], "install", "--yes",
-    #                       "-c", "http://conda.binstar.org/%s" % binstar_user] + extra_pkgs)
+            "nose", "numpy", "pandas", "patsy", "pycrypto", "pip", "pysam",
+            "pyyaml", "pyzmq", "requests", "scipy", "setuptools", "sqlalchemy",
+            "statsmodels", "tornado"]
+    channels = ["-c", "https://conda.binstar.org/collections/chapmanb/bcbio"]
+    subprocess.check_call([anaconda["conda"], "install", "--yes", "numpy"])
+    subprocess.check_call([anaconda["conda"], "install", "--yes"] + channels + pkgs)
 
 def _guess_distribution():
     """Simple approach to identify if we are on a MacOSX or Linux system for Anaconda.
@@ -112,11 +116,18 @@ def install_anaconda_python(args, remotes):
         url = remotes["anaconda"] % ("MacOSX" if dist.lower() == "macosx" else "Linux")
         if not os.path.exists(os.path.basename(url)):
             subprocess.check_call(["wget", url])
-        subprocess.check_call("echo -e '\nyes\n%s\nno\n' | bash %s" %
-                              (anaconda_dir, os.path.basename(url)), shell=True)
+        subprocess.check_call("bash %s -b -p %s" %
+                              (os.path.basename(url), anaconda_dir), shell=True)
     return {"conda": conda,
             "pip": os.path.join(bindir, "pip"),
             "dir": anaconda_dir}
+
+def setup_manifest(datadir):
+    """Create barebones manifest to be filled in during update
+    """
+    manifest_dir = os.path.join(datadir, "manifest")
+    if not os.path.exists(manifest_dir):
+        os.makedirs(manifest_dir)
 
 def write_system_config(base_url, datadir, tooldir):
     """Write a bcbio_system.yaml configuration file with tool information.
@@ -185,6 +196,24 @@ def check_dependencies():
     except OSError:
         raise OSError("bcbio-nextgen installer requires Git (http://git-scm.com/)")
 
+def _check_toolplus(x):
+    """Parse options for adding non-standard/commercial tools like GATK and MuTecT.
+    """
+    import argparse
+    Tool = collections.namedtuple("Tool", ["name", "fname"])
+    std_choices = set(["data"])
+    if x in std_choices:
+        return Tool(x, None)
+    elif "=" in x and len(x.split("=")) == 2:
+        name, fname = x.split("=")
+        fname = os.path.normpath(os.path.realpath(fname))
+        if not os.path.exists(fname):
+            raise argparse.ArgumentTypeError("Unexpected --toolplus argument for %s. File does not exist: %s"
+                                             % (name, fname))
+        return Tool(name, fname)
+    else:
+        raise argparse.ArgumentTypeError("Unexpected --toolplus argument. Expect toolname=filename.")
+
 if __name__ == "__main__":
     try:
         import argparse
@@ -200,11 +229,13 @@ if __name__ == "__main__":
                         help="Directory to install 3rd party software tools. Leave unspecified for no tools",
                         type=lambda x: (os.path.abspath(os.path.expanduser(x))), default=None)
     parser.add_argument("--toolplus", help="Specify additional tool categories to install",
-                        action="append", default=[], choices=["protected", "data"])
+                        action="append", default=[], type=_check_toolplus)
     parser.add_argument("--genomes", help="Genomes to download",
-                        action="append", default=["GRCh37"])
+                        action="append", default=["GRCh37"],
+                        choices=["GRCh37", "hg19", "mm10", "mm9", "rn5", "canFam3"])
     parser.add_argument("--aligners", help="Aligner indexes to download",
-                        action="append", default=["bwa"])
+                        action="append", default=["bwa"],
+                        choices=["bowtie", "bowtie2", "bwa", "novoalign", "star", "ucsc"])
     parser.add_argument("--nodata", help="Do not install data dependencies",
                         dest="install_data", action="store_false", default=True)
     parser.add_argument("--nosudo", help="Specify we cannot use sudo for commands",
@@ -213,10 +244,6 @@ if __name__ == "__main__":
                         dest="isolate", action="store_true", default=False)
     parser.add_argument("-u", "--upgrade", help="Code version to install",
                         choices=["stable", "development"], default="stable")
-    parser.add_argument("--tooldist",
-                        help="Type of tool distribution to install. Defaults to a minimum install.",
-                        default="minimal",
-                        choices=["minimal", "full"])
     parser.add_argument("--distribution", help="Operating system distribution",
                         default="",
                         choices=["ubuntu", "debian", "centos", "scientificlinux", "macosx"])

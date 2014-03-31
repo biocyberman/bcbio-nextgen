@@ -5,8 +5,9 @@ import shutil
 import subprocess
 
 import lxml.html
-import pybedtools
 import yaml
+from datetime import datetime
+
 # allow graceful during upgrades
 try:
     import matplotlib
@@ -22,6 +23,7 @@ from bcbio.pipeline import config_utils
 from bcbio.provenance import do
 import bcbio.rnaseq.qc
 from bcbio.variation.realign import has_aligned_reads
+from bcbio.rnaseq.coverage import plot_gene_coverage
 
 # ## High level functions to generate summary PDF
 
@@ -55,6 +57,7 @@ def _run_qc_tools(bam_file, data):
     to_run = [("fastqc", _run_fastqc)]
     if data["analysis"].lower() == "rna-seq":
         to_run.append(("rnaseqc", bcbio.rnaseq.qc.sample_summary))
+#        to_run.append(("coverage", _run_gene_coverage))
         to_run.append(("complexity", _run_complexity))
     elif data["analysis"].lower() == "chip-seq":
         to_run.append(["bamtools", _run_bamtools_stats])
@@ -67,18 +70,82 @@ def _run_qc_tools(bam_file, data):
         cur_metrics = qc_fn(bam_file, data, cur_qc_dir)
         metrics.update(cur_metrics)
     metrics["Name"] = data["name"][-1]
+    metrics["Quality format"] = utils.get_in(data,
+                                             ("config", "algorithm",
+                                              "quality_format"),
+                                             "standard").lower()
     return {"qc": qc_dir, "metrics": metrics}
 
 # ## Generate project level QC summary for quickly assessing large projects
 
 def write_project_summary(samples):
     """Write project summary information on the provided samples.
+    write out dirs, genome resources,
+
     """
-    out_file = os.path.join(samples[0][0]["dirs"]["work"], "project-summary.yaml")
+    work_dir = samples[0][0]["dirs"]["work"]
+    out_file = os.path.join(work_dir, "project-summary.yaml")
+    upload_dir = (os.path.join(work_dir, samples[0][0]["upload"]["dir"])
+                  if "dir" in samples[0][0]["upload"] else "")
+    test_run = samples[0][0].get("test_run", False)
+    date = str(datetime.now())
+    prev_samples = _other_pipeline_samples(out_file, samples)
     with open(out_file, "w") as out_handle:
-        yaml.dump([data[0]["summary"]["metrics"] for data in samples if "summary" in data[0]],
-                  out_handle, default_flow_style=False, allow_unicode=False)
+        yaml.dump({"date": date}, out_handle,
+                  default_flow_style=False, allow_unicode=False)
+        if test_run:
+            yaml.dump({"test_run": True}, out_handle, default_flow_style=False,
+                      allow_unicode=False)
+        yaml.dump({"upload": upload_dir}, out_handle,
+                  default_flow_style=False, allow_unicode=False)
+        yaml.dump({"bcbio_system": samples[0][0]["config"].get("bcbio_system", "")}, out_handle,
+                  default_flow_style=False, allow_unicode=False)
+        yaml.dump({"samples": prev_samples + [_save_fields(sample[0]) for sample in samples]}, out_handle,
+                  default_flow_style=False, allow_unicode=False)
     return out_file
+
+def _other_pipeline_samples(summary_file, cur_samples):
+    """Retrieve samples produced previously by another pipeline in the summary output.
+    """
+    cur_descriptions = set([s[0]["description"] for s in cur_samples])
+    out = []
+    if os.path.exists(summary_file):
+        with open(summary_file) as in_handle:
+            for s in yaml.load(in_handle).get("samples", []):
+                if s["description"] not in cur_descriptions:
+                    out.append(s)
+    return out
+
+def _save_fields(sample):
+    to_save = ["dirs", "genome_resources", "genome_build", "sam_ref", "metadata",
+               "description"]
+    saved = {k: sample[k] for k in to_save if k in sample}
+    if "summary" in sample:
+        saved["summary"] = {"metrics": sample["summary"]["metrics"]}
+        # check if disambiguation was run
+        if "disambiguate" in sample:
+            if utils.file_exists(sample["disambiguate"]["summary"]):
+                disambigStats = _parse_disambiguate(sample["disambiguate"]["summary"])
+                saved["summary"]["metrics"]["Disambiguated %s reads" % str(sample["genome_build"])] = disambigStats[0]
+                disambigGenome = (sample["config"]["algorithm"]["disambiguate"][0]
+                                  if isinstance(sample["config"]["algorithm"]["disambiguate"], (list, tuple))
+                                  else sample["config"]["algorithm"]["disambiguate"])
+                saved["summary"]["metrics"]["Disambiguated %s reads" % disambigGenome] = disambigStats[1]
+                saved["summary"]["metrics"]["Disambiguated ambiguous reads"] = disambigStats[2]
+    return saved
+
+def _parse_disambiguate(disambiguatestatsfilename):
+    """Parse disambiguation stats from given file.
+    """
+    disambig_stats = [-1, -1, -1]
+    with open(disambiguatestatsfilename, "r") as in_handle:
+        header = in_handle.readline().strip().split("\t")
+        if header == ['sample', 'unique species A pairs', 'unique species B pairs', 'ambiguous pairs']:
+            disambig_stats_tmp = in_handle.readline().strip().split("\t")[1:]
+            if len(disambig_stats_tmp) == 3:
+                disambig_stats = [int(x) for x in disambig_stats_tmp]
+    return disambig_stats
+
 
 # ## Run and parse read information from FastQC
 
@@ -87,7 +154,8 @@ class FastQCParser:
         self._dir = base_dir
 
     def get_fastqc_summary(self):
-        ignore = set(["Total Sequences", "Filtered Sequences", "Filename", "File type"])
+        ignore = set(["Total Sequences", "Filtered Sequences",
+                      "Filename", "File type", "Encoding"])
         stats = {}
         for stat_line in self._fastqc_data_section("Basic Statistics")[1:]:
             k, v = stat_line.split("\t")[:2]
@@ -110,13 +178,25 @@ class FastQCParser:
                         out.append(line.rstrip("\r\n"))
         return out
 
+def _run_gene_coverage(bam_file, data, out_dir):
+    out_file = os.path.join(out_dir, "gene_coverage.pdf")
+    ref_file = utils.get_in(data, ("genome_resources", "rnaseq", "transcripts"))
+    count_file = data["count_file"]
+    if utils.file_exists(out_file):
+        return out_file
+    with file_transaction(out_file) as tx_out_file:
+        plot_gene_coverage(bam_file, ref_file, count_file, tx_out_file)
+    return {"gene_coverage": out_file}
+
+
 def _run_fastqc(bam_file, data, fastqc_out):
     """Run fastqc, generating report in specified directory and parsing metrics.
 
     Downsamples to 10 million reads to avoid excessive processing times with large
     files.
     """
-    if not os.path.exists(os.path.join(fastqc_out, "fastqc_report.html")):
+    sentry_file = os.path.join(fastqc_out, "fastqc_report.html")
+    if not os.path.exists(sentry_file):
         work_dir = os.path.dirname(fastqc_out)
         utils.safe_makedir(work_dir)
         ds_bam = bam.downsample(bam_file, data, 1e7)
@@ -131,7 +211,10 @@ def _run_fastqc(bam_file, data, fastqc_out):
                                              "%s_fastqc" % os.path.splitext(os.path.basename(bam_file))[0])
                 if os.path.exists("%s.zip" % fastqc_outdir):
                     os.remove("%s.zip" % fastqc_outdir)
-                shutil.move(fastqc_outdir, fastqc_out)
+                if not os.path.exists(sentry_file):
+                    if os.path.exists(fastqc_out):
+                        shutil.rmtree(fastqc_out)
+                    shutil.move(fastqc_outdir, fastqc_out)
         if ds_bam and os.path.exists(ds_bam):
             os.remove(ds_bam)
     parser = FastQCParser(fastqc_out)
@@ -139,10 +222,17 @@ def _run_fastqc(bam_file, data, fastqc_out):
     return stats
 
 def _run_complexity(bam_file, data, out_dir):
+    try:
+        import pandas as pd
+        import statsmodels.formula.api as sm
+    except ImportError:
+        return {"Unique Starts Per Read": "NA"}
+
+    SAMPLE_SIZE = 1000000
     base, _ = os.path.splitext(os.path.basename(bam_file))
     utils.safe_makedir(out_dir)
     out_file = os.path.join(out_dir, base + ".pdf")
-    df = bcbio.rnaseq.qc.starts_by_depth(bam_file)
+    df = bcbio.rnaseq.qc.starts_by_depth(bam_file, data["config"], SAMPLE_SIZE)
     if not utils.file_exists(out_file):
         with file_transaction(out_file) as tmp_out_file:
             df.plot(x='reads', y='starts', title=bam_file + " complexity")
@@ -207,7 +297,7 @@ def _parse_qualimap_metrics(report_file):
     """Extract useful metrics from the qualimap HTML report file.
     """
     out = {}
-    parsers = {"Globals" : _parse_qualimap_globals,
+    parsers = {"Globals": _parse_qualimap_globals,
                "Globals (inside of regions)": _parse_qualimap_globals_inregion,
                "Coverage": _parse_qualimap_coverage,
                "Coverage (inside of regions)": _parse_qualimap_coverage,
@@ -223,12 +313,13 @@ def _parse_qualimap_metrics(report_file):
 def _bed_to_bed6(orig_file, out_dir):
     """Convert bed to required bed6 inputs.
     """
+    import pybedtools
     bed6_file = os.path.join(out_dir, "%s-bed6%s" % os.path.splitext(os.path.basename(orig_file)))
     if not utils.file_exists(bed6_file):
         with open(bed6_file, "w") as out_handle:
             for i, region in enumerate(list(x) for x in pybedtools.BedTool(orig_file)):
                 fillers = [str(i), "1.0", "+"]
-                full = region + fillers[:6-len(region)]
+                full = region + fillers[:6 - len(region)]
                 out_handle.write("\t".join(full) + "\n")
     return bed6_file
 
@@ -302,22 +393,29 @@ def _run_gemini_stats(bam_file, data, out_dir):
     out = {}
     gemini_db = data.get("variants", [{}])[0].get("population", {}).get("db")
     if gemini_db:
-        gemini = config_utils.get_program("gemini", data["config"])
-        tstv = subprocess.check_output([gemini, "stats", "--tstv", gemini_db])
-        gt_counts = subprocess.check_output([gemini, "stats", "--gts-by-sample", gemini_db])
-        dbsnp_count = subprocess.check_output([gemini, "query", gemini_db, "-q",
-                                               "SELECT count(*) FROM variants WHERE in_dbsnp==1"])
-        out["Transition/Transversion"] = tstv.split("\n")[1].split()[-1]
-        for line in gt_counts.split("\n"):
-            parts = line.rstrip().split()
-            if len(parts) > 0 and parts[0] == data["name"][-1]:
-                _, hom_ref, het, hom_var, _, total = parts
-                out["Variations (total)"] = int(total)
-                out["Variations (heterozygous)"] = int(het)
-                out["Variations (homozygous)"] = int(hom_var)
-                break
-        out["Variations (in dbSNP)"] = int(dbsnp_count.strip())
-        if out.get("Variations (total)") > 0:
-            out["Variations (in dbSNP) pct"] = "%.1f%%" % (out["Variations (in dbSNP)"] /
-                                                           float(out["Variations (total)"]) * 100.0)
+        gemini_stat_file = "%s-stats.yaml" % os.path.splitext(gemini_db)[0]
+        if not utils.file_uptodate(gemini_stat_file, gemini_db):
+            gemini = config_utils.get_program("gemini", data["config"])
+            tstv = subprocess.check_output([gemini, "stats", "--tstv", gemini_db])
+            gt_counts = subprocess.check_output([gemini, "stats", "--gts-by-sample", gemini_db])
+            dbsnp_count = subprocess.check_output([gemini, "query", gemini_db, "-q",
+                                                   "SELECT count(*) FROM variants WHERE in_dbsnp==1"])
+            out["Transition/Transversion"] = tstv.split("\n")[1].split()[-1]
+            for line in gt_counts.split("\n"):
+                parts = line.rstrip().split()
+                if len(parts) > 0 and parts[0] == data["name"][-1]:
+                    _, hom_ref, het, hom_var, _, total = parts
+                    out["Variations (total)"] = int(total)
+                    out["Variations (heterozygous)"] = int(het)
+                    out["Variations (homozygous)"] = int(hom_var)
+                    break
+            out["Variations (in dbSNP)"] = int(dbsnp_count.strip())
+            if out.get("Variations (total)") > 0:
+                out["Variations (in dbSNP) pct"] = "%.1f%%" % (out["Variations (in dbSNP)"] /
+                                                               float(out["Variations (total)"]) * 100.0)
+            with open(gemini_stat_file, "w") as out_handle:
+                yaml.safe_dump(out, out_handle, default_flow_style=False, allow_unicode=False)
+        else:
+            with open(gemini_stat_file) as in_handle:
+                out = yaml.safe_load(in_handle)
     return out

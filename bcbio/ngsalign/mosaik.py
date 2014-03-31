@@ -16,7 +16,7 @@ def _mosaik_args_from_config(config):
     """
     multi_mappers = config["algorithm"].get("multiple_mappers", True)
     multi_flags = ["-m", "all"] if multi_mappers else ["-m", "unique"]
-    error_flags = ["-mm", config["algorithm"]["max_errors"]]
+    error_flags = ["-mm", "2"]
     num_cores = config["algorithm"].get("num_cores", 1)
     core_flags = ["-p", str(num_cores)] if num_cores > 1 else []
     return core_flags + multi_flags + error_flags
@@ -53,13 +53,13 @@ def _get_mosaik_nn_args(out_file):
         out += [arg, arg_fname]
     return out
 
-def align(fastq_file, pair_file, ref_file, out_base, align_dir, data,
-          extra_args=None, names=None):
+def align(fastq_file, pair_file, ref_file, names, align_dir, data,
+          extra_args=None):
     """Alignment with MosaikAligner.
     """
     config = data["config"]
     rg_name = names.get("rg", None) if names else None
-    out_file = os.path.join(align_dir, "%s-align.bam" % out_base)
+    out_file = os.path.join(align_dir, "%s-align.bam" % names["lane"])
     if not file_exists(out_file):
         with file_transaction(out_file) as tx_out_file:
             built_fastq = _convert_fastq(fastq_file, pair_file, rg_name,

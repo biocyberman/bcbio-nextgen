@@ -13,15 +13,18 @@ import contextlib
 import copy
 import operator
 import os
-import shutil
+import sys
 
-import pybedtools
+import numpy
 import pysam
-from py_descriptive_statistics import Enum as Stats
+try:
+    import pybedtools
+except ImportError:
+    pybedtools = None
 
 from bcbio import bam, broad, utils
 from bcbio.log import logger
-from bcbio.distributed.messaging import parallel_runner, zeromq_aware_logging
+from bcbio.distributed import multi, prun
 from bcbio.distributed.split import parallel_split_combine
 from bcbio.distributed.transaction import file_transaction
 from bcbio.pipeline import shared
@@ -32,66 +35,97 @@ def parallel_callable_loci(in_bam, ref_file, config):
     config["algorithm"]["memory_adjust"] = {"direction": "decrease", "magnitude": 2}
     data = {"work_bam": in_bam, "sam_ref": ref_file, "config": config}
     parallel = {"type": "local", "cores": num_cores, "module": "bcbio.distributed"}
-    runner = parallel_runner(parallel, {}, config)
-    split_fn = shared.process_bam_by_chromosome("-callable.bed", "work_bam")
-    out = parallel_split_combine([[data]], split_fn, runner,
-                                 "calc_callable_loci", "combine_bed",
-                                 "callable_bed", ["config"])[0]
+    items = [[data]]
+    with prun.start(parallel, items, config) as runner:
+        split_fn = shared.process_bam_by_chromosome("-callable.bed", "work_bam")
+        out = parallel_split_combine(items, split_fn, runner,
+                                     "calc_callable_loci", "combine_bed",
+                                     "callable_bed", ["config"])[0]
     return out[0]["callable_bed"]
 
-def combine_bed(in_files, out_file, config):
-    """Combine multiple BED files into a single output.
-    """
-    if not utils.file_exists(out_file):
-        with file_transaction(out_file) as tx_out_file:
-            with open(tx_out_file, "w") as out_handle:
-                for in_file in in_files:
-                    with open(in_file) as in_handle:
-                        shutil.copyfileobj(in_handle, out_handle)
-    return out_file
-
-@zeromq_aware_logging
+@multi.zeromq_aware_logging
 def calc_callable_loci(data, region=None, out_file=None):
-    """Determine callable bases for input BAM using Broad's CallableLoci walker.
+    """Determine callable bases for an input BAM in the given region.
 
-    http://www.broadinstitute.org/gatk/gatkdocs/
-    org_broadinstitute_sting_gatk_walkers_coverage_CallableLoci.html
+    We also identify super high depth regions (7x more than the set maximum depth) to
+    avoid calling in since these are repetitive centromere and telomere regions that spike
+    memory usage.
     """
-    broad_runner = broad.runner_from_config(data["config"])
     if out_file is None:
         out_file = "%s-callable.bed" % os.path.splitext(data["work_bam"])[0]
-    out_summary = "%s-callable-summary.txt" % os.path.splitext(data["work_bam"])[0]
-    variant_regions = data["config"]["algorithm"].get("variant_regions", None)
-    # set a maximum depth to avoid calling in repetitive regions with excessive coverage
-    max_depth = int(1e6 if data["config"]["algorithm"].get("coverage_depth", "").lower() == "super-high"
-                    else 2.5e4)
+    max_depth = utils.get_in(data, ("config", "algorithm", "coverage_depth_max"), 10000)
+    depth = {"max": max_depth * 7 if max_depth > 0 else sys.maxint - 1,
+             "min": utils.get_in(data, ("config", "algorithm", "coverage_depth_min"), 4)}
     if not utils.file_exists(out_file):
         with file_transaction(out_file) as tx_out_file:
             bam.index(data["work_bam"], data["config"])
-            params = ["-T", "CallableLoci",
-                      "-R", data["sam_ref"],
-                      "-I", data["work_bam"],
-                      "--minDepth", "0",
-                      "--downsample_to_coverage", str(max_depth + 1000),
-                      "--minMappingQuality", "0",
-                      "--maxFractionOfReadsWithLowMAPQ", "1.1",
-                      "--maxDepth", str(max_depth),
-                      "--out", tx_out_file,
-                      "--summary", out_summary]
-            ready_region = shared.subset_variant_regions(variant_regions, region, tx_out_file)
-            if ready_region:
-                params += ["-L", ready_region]
-            if ((variant_regions and ready_region and os.path.isfile(ready_region))
-                 or not variant_regions or not region):
-                broad_runner.run_gatk(params, data=data, region=region,
-                                      memory_retry=True)
-            else:
-                with open(out_file, "w") as out_handle:
-                    for tregion in get_ref_bedtool(data["sam_ref"], data["config"]):
-                        if tregion.chrom == region:
-                            out_handle.write("%s\t%s\t%s\tNO_COVERAGE\n" %
-                                             (tregion.chrom, tregion.start, tregion.stop))
+            with contextlib.closing(pysam.Samfile(data["work_bam"], "rb")) as in_bam:
+                with open(tx_out_file, "w") as out_handle:
+                    for r in _regions_for_coverage(data, region, tx_out_file):
+                        for chrom, start, end, info in _get_coverage_in_region(in_bam, r, depth):
+                            out_handle.write("%s\t%s\t%s\t%s\n" % (chrom, start, end, info))
     return [{"callable_bed": out_file, "config": data["config"], "work_bam": data["work_bam"]}]
+
+def _get_coverage_in_region(in_bam, region, depth):
+    """Retrieve summary of coverage in a region.
+    Uses chajo's approach of pre-allocating a numpy array for coverage before collapsing
+    to cleanly handle non-covered positions. This uses 2Gb memory for human chr1. If memory
+    requirements become an issue, could look at splitting long chromosomes at smart places.
+    XXX Can replace `positions` with chanjo functionality when it accepts max_depth keyword.
+    """
+    # special case, do not calculate if we are in a chromosome not covered by BED file
+    if region.attrs.get("no_coverage"):
+        yield region.chrom, region.start, region.end, "NO_COVERAGE"
+    else:
+        positions = numpy.zeros(region.end + 1 - region.start)
+        for col in in_bam.pileup(str(region.chrom), region.start, region.end + 1, stepper="all",
+                                 max_depth=depth["max"] + 10, truncate=True):
+            positions[col.pos - region.start] = col.n
+        cur_ctype = None
+        cur_start = None
+        for i, count in enumerate(positions):
+            ctype = _get_ctype(count, depth)
+            if cur_ctype is None:
+                cur_ctype = ctype
+                cur_start = i
+            elif cur_ctype != ctype:
+                yield region.chrom, region.start + cur_start, region.start + i, cur_ctype
+                cur_ctype = ctype
+                cur_start = i
+        if i > cur_start:
+            yield region.chrom, region.start + cur_start, region.start + i, cur_ctype
+
+def _get_ctype(count, depth):
+    if count == 0:
+        return "NO_COVERAGE"
+    elif count < depth["min"]:
+        return "LOW_COVERAGE"
+    elif count > depth["max"]:
+        return "EXCESSIVE_COVERAGE"
+    else:
+        return "CALLABLE"
+
+def _regions_for_coverage(data, region, out_file):
+    """Retrieve BedTool iterator over regions we need to calculate coverage in.
+    """
+    variant_regions = utils.get_in(data, ("config", "algorithm", "variant_regions"))
+    ready_region = shared.subset_variant_regions(variant_regions, region, out_file)
+    if not ready_region:
+        return get_ref_bedtool(data["sam_ref"], data["config"])
+    elif os.path.isfile(ready_region):
+        return pybedtools.BedTool(ready_region).intervals
+    elif isinstance(ready_region, (list, tuple)):
+        c, s, e = ready_region
+        return [pybedtools.Interval(c, s, e)]
+    else:
+        assert isinstance(ready_region, basestring)
+        out = []
+        for r in [x for x in get_ref_bedtool(data["sam_ref"], data["config"])
+                  if x.chrom == ready_region]:
+            # If we have variant regions but none in this region, don't calculate coverage
+            r.attrs["no_coverage"] = variant_regions is not None
+            out.append(r)
+        return out
 
 def sample_callable_bed(bam_file, ref_file, config):
     """Retrieve callable regions for a sample subset by defined analysis regions.
@@ -130,7 +164,7 @@ def _get_nblock_regions(in_file, min_n_size):
     with open(in_file) as in_handle:
         for line in in_handle:
             contig, start, end, ctype = line.rstrip().split()
-            if (ctype in ["REF_N", "NO_COVERAGE", "EXCESSIVE_COVERAGE"] and
+            if (ctype in ["REF_N", "NO_COVERAGE", "EXCESSIVE_COVERAGE", "LOW_COVERAGE"] and
                   int(end) - int(start) > min_n_size):
                 out_lines.append("%s\t%s\t%s\n" % (contig, start, end))
     return pybedtools.BedTool("\n".join(out_lines), from_string=True)
@@ -188,6 +222,7 @@ class NBlockRegionPicker:
         self._chr_last_blocks = {}
         target_blocks = int(config["algorithm"].get("nomap_split_targets", 2000))
         self._target_size = self._get_target_size(target_blocks, ref_regions)
+        self._ref_sizes = {x.chrom: x.stop for x in ref_regions}
 
     def _get_target_size(self, target_blocks, ref_regions):
         size = 0
@@ -201,6 +236,9 @@ class NBlockRegionPicker:
         last_pos = self._chr_last_blocks.get(x.chrom, 0)
         if (x.start - last_pos) > self._target_size:
             self._chr_last_blocks[x.chrom] = x.stop
+            return True
+        # fills an entire chromosome, handles smaller decoy and haplotype chromosomes
+        elif last_pos == 0 and x.stop >= self._ref_sizes.get(x.chrom, 0) - 100:
             return True
         else:
             return False
@@ -243,14 +281,13 @@ def _analysis_block_stats(regions):
     def descriptive_stats(xs):
         if len(xs) < 2:
             return xs
-        calc = Stats(xs)
         parts = ["min: %s" % min(xs),
-                 "5%%: %s" % calc.percentile(5),
-                 "25%%: %s" % calc.percentile(25),
-                 "median: %s" % calc.percentile(50),
-                 "75%%: %s" % calc.percentile(75),
-                 "95%%: %s" % calc.percentile(95),
-                 "99%%: %s" % calc.percentile(99),
+                 "5%%: %s" % numpy.percentile(xs, 5),
+                 "25%%: %s" % numpy.percentile(xs, 25),
+                 "median: %s" % numpy.percentile(xs, 50),
+                 "75%%: %s" % numpy.percentile(xs, 75),
+                 "95%%: %s" % numpy.percentile(xs, 95),
+                 "99%%: %s" % numpy.percentile(xs, 99),
                  "max: %s" % max(xs)]
         return "\n".join(["  " + x for x in parts])
     logger.info("Identified %s parallel analysis blocks\n" % len(region_sizes) +
@@ -288,7 +325,7 @@ def _combine_excessive_coverage(samples, ref_regions, min_n_size):
     else:
         return merge_ecs
 
-def combine_sample_regions(samples):
+def combine_sample_regions(*samples):
     """Create global set of callable regions for multi-sample calling.
 
     Intersects all non-callable (nblock) regions from all samples,
@@ -311,7 +348,7 @@ def combine_sample_regions(samples):
         ec_regions = _combine_excessive_coverage(samples, ref_regions, min_n_size)
         block_filter = NBlockRegionPicker(ref_regions, config)
         nblock_size_filtered = nblock_regions.filter(block_filter.include_block).saveas()
-        if len(nblock_size_filtered) > len(ref_regions):
+        if len(nblock_size_filtered) >= len(ref_regions):
             final_nblock_regions = nblock_size_filtered
         else:
             final_nblock_regions = nblock_regions
@@ -326,4 +363,4 @@ def combine_sample_regions(samples):
     regions = {"analysis": [(r.chrom, int(r.start), int(r.stop)) for r in final_regions],
                "noanalysis": no_analysis_file,
                "analysis_bed": analysis_file}
-    return regions
+    return [regions]

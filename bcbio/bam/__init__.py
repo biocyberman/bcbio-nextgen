@@ -2,6 +2,7 @@
 """
 import contextlib
 import os
+import subprocess
 
 import pysam
 
@@ -66,14 +67,11 @@ def downsample(in_bam, data, target_counts):
         out_file = "%s-downsample%s" % os.path.splitext(in_bam)
         if not utils.file_exists(out_file):
             with file_transaction(out_file) as tx_out_file:
-                args = ["-T", "PrintReads",
-                        "-R", data["sam_ref"],
-                        "-I", in_bam,
-                        "--downsample_to_fraction", "%.3f" % ds_pct,
-                        "--out", tx_out_file]
-                if broad_runner.gatk_type() == "restricted":
-                    args += ["--filter_reads_with_N_cigar"]
-                broad_runner.run_gatk(args)
+                sambamba = config_utils.get_program("sambamba", data["config"])
+                num_cores = data["config"]["algorithm"].get("num_cores", 1)
+                cmd = ("{sambamba} view -t {num_cores} -f bam -o {tx_out_file} "
+                       "--subsample={ds_pct:.3} --subsampling-seed=42 {in_bam}")
+                do.run(cmd.format(**locals()), "Downsample BAM file: %s" % os.path.basename(in_bam))
         return out_file
 
 def open_samfile(in_file):
@@ -100,11 +98,102 @@ def is_sam(in_file):
     else:
         return False
 
-def count(in_bam):
+def mapped(in_bam, config):
     """
-    return the counts in a SAM/BAM file
+    return a bam file of only the mapped reads
     """
-    return int(pysam.view("-c", in_bam)[0].strip())
+    out_file = os.path.splitext(in_bam)[0] + ".mapped.bam"
+    if utils.file_exists(out_file):
+        return out_file
+    sambamba = _get_sambamba(config)
+    with file_transaction(out_file) as tx_out_file:
+        if sambamba:
+            cmd = ("{sambamba} view --format=bam -F 'not (unmapped or mate_is_unmapped)' "
+                   "{in_bam} -o {tx_out_file}")
+        else:
+            samtools = config_utils.get_program("samtools", config)
+            cmd = "{samtools} view -b -F 4 {in_bam} -o {tx_out_file}"
+        do.run(cmd.format(**locals()),
+               "Filtering mapped reads to %s." % (tx_out_file))
+    return out_file
+
+
+def count(in_bam, config=None):
+    """
+    return the counts in a BAM file
+    """
+    if not config:
+        config = {}
+    sambamba = _get_sambamba(config)
+    if sambamba:
+        cmd = ("{sambamba} view -c {in_bam}").format(**locals())
+    else:
+        samtools = config_utils.get_program("samtools", config)
+        cmd = ("{samtools} view -c {in_bam}").format(**locals())
+    out = subprocess.check_output(cmd, shell=True)
+    return int(out)
+
+def sam_to_bam(in_sam, config):
+    if is_bam(in_sam):
+        return in_sam
+
+    assert is_sam(in_sam), "%s is not a SAM file" % in_sam
+    out_file = os.path.splitext(in_sam)[0] + ".bam"
+    if utils.file_exists(out_file):
+        return out_file
+
+    samtools = config_utils.get_program("samtools", config)
+    num_cores = config["algorithm"].get("num_cores", 1)
+    with file_transaction(out_file) as tx_out_file:
+        cmd = "{samtools} view -@ {num_cores} -h -S -b {in_sam} -o {tx_out_file}"
+        do.run(cmd.format(**locals()),
+               ("Convert SAM to BAM (%s cores): %s to %s"
+                % (str(num_cores), in_sam, out_file)))
+    return out_file
+
+def bam_to_sam(in_file, config):
+    if is_sam(in_file):
+        return in_file
+
+    assert is_bam(in_file), "%s is not a BAM file" % in_file
+    out_file = os.path.splitext(in_file)[0] + ".sam"
+    if utils.file_exists(out_file):
+        return out_file
+
+    samtools = config_utils.get_program("samtools", config)
+    num_cores = config["algorithm"].get("num_cores", 1)
+    with file_transaction(out_file) as tx_out_file:
+        cmd = "{samtools} view -@ {num_cores} -h {in_file} -o {tx_out_file}"
+        do.run(cmd.format(**locals()),
+               ("Convert BAM to SAM (%s cores): %s to %s"
+                % (str(num_cores), in_file, out_file)))
+    return out_file
+
+def reheader(header, bam_file, config):
+    samtools = config_utils.get_program("samtools", config)
+    base, ext = os.path.splitext(bam_file)
+    out_file = base + ".reheadered" + ext
+    cmd = "{samtools} reheader {header} {bam_file} > {out_file}"
+    do.run(cmd.format(**locals()), "Reheadering %s." % bam_file)
+    return out_file
+
+
+def merge(bamfiles, out_bam, config):
+    assert all(map(is_bam, bamfiles)), ("Not all of the files to merge are not BAM "
+                                        "files: %s " % (bamfiles))
+    assert all(map(utils.file_exists, bamfiles)), ("Not all of the files to merge "
+                                             "exist: %s" % (bamfiles))
+    sambamba = _get_sambamba(config)
+    sambamba = None
+    samtools = config_utils.get_program("samtools", config)
+    num_cores = config["algorithm"].get("num_cores", 1)
+    with file_transaction(out_bam) as tx_out_bam:
+        if sambamba:
+            cmd = "{sambamba} merge -t {num_cores} {tx_out_bam} " + " ".join(bamfiles)
+        else:
+            cmd = "{samtools} merge -@ {num_cores} {tx_out_bam} " + " ".join(bamfiles)
+        do.run(cmd.format(**locals()), "Merge %s into %s." % (bamfiles, out_bam))
+    return out_bam
 
 
 def sort(in_bam, config, order="coordinate"):
@@ -118,6 +207,7 @@ def sort(in_bam, config, order="coordinate"):
     sort_file = sort_stem + ".bam"
     if not utils.file_exists(sort_file):
         sambamba = _get_sambamba(config)
+        sambamba = None
         samtools = config_utils.get_program("samtools", config)
         num_cores = config["algorithm"].get("num_cores", 1)
         with file_transaction(sort_file) as tx_sort_file:
@@ -125,7 +215,7 @@ def sort(in_bam, config, order="coordinate"):
             tx_dir = utils.safe_makedir(os.path.dirname(tx_sort_file))
             order_flag = "-n" if order is "queryname" else ""
             samtools_cmd = ("{samtools} sort {order_flag} "
-                            "-o {tx_sort_stem} {in_bam}")
+                            "{in_bam} {tx_sort_stem}")
             if sambamba:
                 cmd = ("{sambamba} sort -t {num_cores} {order_flag} "
                        "-o {tx_sort_file} --tmpdir={tx_dir} {in_bam}")
@@ -159,7 +249,7 @@ def bam_already_sorted(in_bam, config, order):
 
 
 def _get_sort_order(in_bam, config):
-    with pysam.Samfile(in_bam, "rb") as bam_handle:
+    with open_samfile(in_bam) as bam_handle:
         header = bam_handle.header
     return utils.get_in(header, ("HD", "SO"), None)
 
@@ -169,3 +259,18 @@ def _get_sort_stem(in_bam, order):
     for suffix in SUFFIXES:
         sort_base = sort_base.split(suffix)[0]
     return sort_base + SUFFIXES[order]
+
+def sample_name(in_bam):
+    """
+    get sample name from a BAM file as a work around for pysam 0.6 header
+    parsing issues. This can get replaced by the pysam version in cortex.py
+    when we move to Docker.
+    """
+    cmd = "samtools view -H {in_bam}".format(**locals())
+    out, _ = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE).communicate()
+    name = None
+    for line in out.split("\n"):
+        if line.startswith("@RG"):
+            name = [x.split(":")[1] for x in line.split() if x.split(":")[0] == "SM"]
+    return name[0] if name else None
+

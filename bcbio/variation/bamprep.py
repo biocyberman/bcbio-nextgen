@@ -22,17 +22,20 @@ def region_to_gatk(region):
 def _gatk_extract_reads_cl(data, region, prep_params, tmp_dir):
     """Use GATK to extract reads from full BAM file, recalibrating if configured.
     """
-    broad_runner = broad.runner_from_config(data["config"])
     args = ["-T", "PrintReads",
             "-L", region_to_gatk(region),
             "-R", data["sam_ref"],
             "-I", data["work_bam"]]
+    if prep_params.get("max_depth"):
+        args += ["--downsample_to_coverage", str(prep_params["max_depth"])]
     if prep_params["recal"] == "gatk":
         if _recal_has_reads(data["prep_recal"]):
             args += ["-BQSR", data["prep_recal"]]
     elif prep_params["recal"]:
         raise NotImplementedError("Recalibration method %s" % prep_params["recal"])
-    return broad_runner.cl_gatk(args, tmp_dir)
+    jvm_opts = broad.get_gatk_framework_opts(data["config"],
+                                             memscale={"direction": "decrease", "magnitude": 3})
+    return [config_utils.get_program("gatk-framework", data["config"])] + jvm_opts + args
 
 def _recal_has_reads(in_file):
     with open(in_file) as in_handle:
@@ -50,7 +53,7 @@ def _piped_input_cl(data, region, tmp_dir, out_base_file, prep_params):
         if not utils.file_exists(sel_file):
             with file_transaction(sel_file) as tx_out_file:
                 cl += ["-o", tx_out_file]
-                do.run_memory_retry(cl, "GATK: PrintReads", data, region=region)
+                do.run(cl, "GATK: PrintReads", data, region=region)
         dup_metrics = "%s-dup.dup_metrics" % os.path.splitext(out_base_file)[0]
         compression = "5" if prep_params["realign"] == "gatk" else "0"
         cl = broad_runner.cl_picard("MarkDuplicates",
@@ -59,7 +62,8 @@ def _piped_input_cl(data, region, tmp_dir, out_base_file, prep_params):
                                      ("METRICS_FILE", dup_metrics),
                                      ("PROGRAM_RECORD_ID", "null"),
                                      ("COMPRESSION_LEVEL", compression),
-                                     ("TMP_DIR", tmp_dir)])
+                                     ("TMP_DIR", tmp_dir)],
+                                    memscale={"direction": "decrease", "magnitude": 2})
     elif not prep_params["dup"]:
         sel_file = data["work_bam"]
     else:
@@ -156,17 +160,17 @@ def _piped_extract_recal_cmd(data, region, prep_params, tmp_dir):
     Combines extraction and recalibration supported by GATK.
     """
     config = data["config"]
-    samtools = config_utils.get_program("samtools", config)
-    out_type = "-u" if prep_params["dup"] or prep_params["realign"] else "-b"
-    if not prep_params.get("recal"):
+    sambamba = config_utils.get_program("sambamba", config)
+    clevel = "0" if prep_params["dup"] or prep_params["realign"] else "-1"
+    if not prep_params.get("recal") and not prep_params.get("max_depth"):
         prep_region = region_to_gatk(region)
         in_file = data["work_bam"]
-        cmd = "{samtools} view {out_type} {in_file} {prep_region}"
+        cmd = "{sambamba} view -f bam --compression-level {clevel} {in_file} {prep_region}"
         return cmd.format(**locals())
-    elif prep_params["recal"] == "gatk":
+    elif prep_params["recal"] == "gatk" or prep_params.get("max_depth"):
         cl = _gatk_extract_reads_cl(data, region, prep_params, tmp_dir)
         cl += ["--logging_level", "ERROR"]
-        cmd = "{samtools} view -S {out_type} -"
+        cmd = "{sambamba} view -S -f bam --compression-level {clevel} /dev/stdin"
         return " ".join(cl) + " | " + cmd.format(**locals())
     else:
         raise ValueError("Unexpected recalibration approach: %s" % prep_params["recal"])
@@ -180,8 +184,8 @@ def _piped_bamprep_region_fullpipe(data, region, prep_params, out_file, tmp_dir)
         realign_cmd = _piped_realign_cmd(data, prep_params, tmp_dir)
         cmd = "{extract_recal_cmd} {dedup_cmd} {realign_cmd}  > {tx_out_file}"
         cmd = cmd.format(**locals())
-        do.run_memory_retry(cmd, "Piped post-alignment bamprep {0}".format(region), data,
-                            region=region)
+        do.run(cmd, "Piped post-alignment bamprep {0}".format(region), data,
+               region=region)
 
 # ## Shared functionality
 
@@ -195,8 +199,10 @@ def _get_prep_params(data):
     recal_param = "gatk" if recal_param is True else recal_param
     realign_param = algorithm.get("realign", True)
     realign_param = "gatk" if realign_param is True else realign_param
+    max_depth = algorithm.get("coverage_depth_max", 10000)
     all_params = set([dup_param, realign_param])
     return {"dup": dup_param, "recal": recal_param, "realign": realign_param,
+            "max_depth": max_depth,
             "all_pipe": "gatk" not in all_params and "picard" not in all_params}
 
 def _piped_bamprep_region(data, region, out_file, tmp_dir):

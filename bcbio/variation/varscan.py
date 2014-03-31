@@ -7,25 +7,24 @@ from distutils.version import LooseVersion
 import os
 import shutil
 
+from bcbio import utils
 from bcbio.distributed.transaction import file_transaction
 from bcbio.pipeline import config_utils
 from bcbio.provenance import do, programs
 from bcbio.utils import file_exists, append_stem
-from bcbio.variation import freebayes, samtools
+from bcbio.variation import freebayes, samtools, vcfutils
 from bcbio.variation.vcfutils import (combine_variant_files, write_empty_vcf,
-                                      get_paired_bams)
+                                      get_paired_bams, is_paired_analysis)
 
 import pysam
 
 
 def run_varscan(align_bams, items, ref_file, assoc_files,
                 region=None, out_file=None):
-
-    if len(align_bams) == 2 and all(item["metadata"].get("phenotype")
-                                    is not None for item in items):
+    if is_paired_analysis(align_bams, items):
         call_file = samtools.shared_variantcall(_varscan_paired, "varscan",
-                                            align_bams, ref_file, items,
-                                            assoc_files, region, out_file)
+                                                align_bams, ref_file, items,
+                                                assoc_files, region, out_file)
     else:
         call_file = samtools.shared_variantcall(_varscan_work, "varscan",
                                                 align_bams, ref_file,
@@ -65,13 +64,16 @@ def _varscan_paired(align_bams, ref_file, items, target_regions, out_file):
 
     # No need for names in VarScan, hence the "_"
 
-    tumor_bam, tumor_name, normal_bam, normal_name = get_paired_bams(
-        align_bams, items)
+    paired = get_paired_bams(align_bams, items)
+    if not paired.normal_bam:
+        raise ValueError("Require both tumor and normal BAM files for VarScan cancer calling")
 
     if not file_exists(out_file):
-        base, ext = os.path.splitext(out_file)
+        orig_out_file = out_file
+        out_file = orig_out_file.replace(".vcf.gz", ".vcf")
+        base, ext = utils.splitext_plus(out_file)
         cleanup_files = []
-        for fname, mpext in [(normal_bam, "normal"), (tumor_bam, "tumor")]:
+        for fname, mpext in [(paired.normal_bam, "normal"), (paired.tumor_bam, "tumor")]:
             mpfile = "%s-%s.mpileup" % (base, mpext)
             cleanup_files.append(mpfile)
             with file_transaction(mpfile) as mpfile_tx:
@@ -88,7 +90,7 @@ def _varscan_paired(align_bams, ref_file, items, target_regions, out_file):
         # just skip the rest of the analysis (VarScan will hang otherwise)
 
         if any(os.stat(filename).st_size == 0 for filename in cleanup_files):
-            write_empty_vcf(out_file)
+            write_empty_vcf(orig_out_file, config)
             return
 
         # First index is normal, second is tumor
@@ -98,7 +100,8 @@ def _varscan_paired(align_bams, ref_file, items, target_regions, out_file):
         jvm_opts = _get_varscan_opts(config)
         varscan_cmd = ("java {jvm_opts} -jar {varscan_jar} somatic"
                        " {normal_tmp_mpileup} {tumor_tmp_mpileup} {base}"
-                       " --output-vcf --min-coverage 5 --p-value 0.98")
+                       " --output-vcf --min-coverage 5 --p-value 0.98 "
+                       "--strand-filter 1 ")
 
         indel_file = base + ".indel.vcf"
         snp_file = base + ".snp.vcf"
@@ -119,14 +122,14 @@ def _varscan_paired(align_bams, ref_file, items, target_regions, out_file):
 
         if do.file_exists(snp_file):
             to_combine.append(snp_file)
-            _fix_varscan_vcf(snp_file, normal_name, tumor_name)
+            _fix_varscan_vcf(snp_file, paired.normal_name, paired.tumor_name)
 
         if do.file_exists(indel_file):
             to_combine.append(indel_file)
-            _fix_varscan_vcf(indel_file, normal_name, tumor_name)
+            _fix_varscan_vcf(indel_file, paired.normal_name, paired.tumor_name)
 
         if not to_combine:
-            write_empty_vcf(out_file)
+            write_empty_vcf(orig_out_file, config)
             return
 
         out_file = combine_variant_files([snp_file, indel_file],
@@ -136,10 +139,15 @@ def _varscan_paired(align_bams, ref_file, items, target_regions, out_file):
         # Remove cleanup files
 
         for extra_file in cleanup_files:
-            os.remove(extra_file)
+            for ext in ["", ".gz", ".gz.tbi"]:
+                if os.path.exists(extra_file + ext):
+                    os.remove(extra_file + ext)
 
         if os.path.getsize(out_file) == 0:
             write_empty_vcf(out_file)
+
+        if orig_out_file.endswith(".gz"):
+            vcfutils.bgzip_and_index(out_file, config)
 
 
 def _fix_varscan_vcf(orig_file, normal_name, tumor_name):
@@ -274,8 +282,10 @@ def _create_sample_list(in_bams, vcf_file):
 def _varscan_work(align_bams, ref_file, items, target_regions, out_file):
     """Perform SNP and indel genotyping with VarScan.
     """
-
     config = items[0]["config"]
+
+    orig_out_file = out_file
+    out_file = orig_out_file.replace(".vcf.gz", ".vcf")
 
     max_read_depth = "1000"
     version = programs.jar_versioner("varscan", "VarScan")(config)
@@ -315,6 +325,9 @@ def _varscan_work(align_bams, ref_file, items, target_regions, out_file):
         write_empty_vcf(out_file)
     else:
         freebayes.clean_vcf_output(out_file, _clean_varscan_line)
+
+    if orig_out_file.endswith(".gz"):
+        vcfutils.bgzip_and_index(out_file, config)
 
 def _clean_varscan_line(line):
     """Avoid lines with non-GATC bases, ambiguous output bases make GATK unhappy.

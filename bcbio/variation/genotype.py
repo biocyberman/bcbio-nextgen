@@ -7,7 +7,7 @@ import copy
 from bcbio import utils
 from bcbio.distributed.split import grouped_parallel_split_combine
 from bcbio.pipeline.shared import process_bam_by_chromosome
-from bcbio.variation import gatk, gatkfilter, multi, phasing, ploidy, vfilter
+from bcbio.variation import gatk, gatkfilter, multi, phasing, ploidy, vfilter, vcfutils
 
 # ## Variant filtration -- shared functionality
 
@@ -122,6 +122,7 @@ def variantcall_sample(data, region=None, out_file=None):
                               data["genome_resources"]["variation"],
                               region, call_file)
         if data["config"]["algorithm"].get("phasing", False) == "gatk":
+            call_file = vcfutils.bgzip_and_index(call_file, config)
             call_file = phasing.read_backed_phasing(call_file, align_bams, sam_ref, region, config)
         utils.symlink_plus(call_file, out_file)
         if "work_items" in data:
